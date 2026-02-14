@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -42,7 +42,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install FFmpeg + Node.js
+      - name: Install system packages
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg nodejs npm
@@ -50,34 +50,26 @@ jobs:
       - name: Install Python packages
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
           pip install --upgrade yt-dlp
-
-      - name: Verify versions
-        run: |
-          echo "yt-dlp version:"
-          yt-dlp --version
-          echo "ffmpeg version:"
-          ffmpeg -version | head -1
-          echo "node version:"
-          node --version
-          echo "python version:"
-          python --version
+          pip install -r requirements.txt
+          echo "yt-dlp version: $(yt-dlp --version)"
 
       - name: Run pipeline
         env:
           SOURCE_URL: ${{ secrets.SOURCE_URL }}
           YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
+          YTDLP_OAUTH_TOKEN: ${{ secrets.YTDLP_OAUTH_TOKEN }}
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '3' }}
           SPEED: ${{ github.event.inputs.speed || '1.05' }}
           PRIVACY: "public"
           ORDER: ${{ github.event.inputs.order || 'oldest' }}
         run: python main.py
 
-      - name: Cleanup cookies
+      - name: Cleanup
         if: always()
-        run: rm -f cookies.txt
+        run: rm -f cookies.txt yt_oauth.json
 
       - name: Save history
         if: always()
@@ -85,5 +77,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add history.txt
-          git diff --staged --quiet || git commit -m "uploaded videos [skip ci]"
+          git diff --staged --quiet || git commit -m "uploaded [skip ci]"
           git push || true
