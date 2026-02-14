@@ -42,12 +42,30 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install system packages
+      - name: Install system packages + Tor
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg nodejs npm
-          curl -fsSL https://deno.land/install.sh | sh
-          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+          sudo apt-get install -y ffmpeg tor torsocks curl
+
+          # Configure Tor
+          echo "ExitNodes {us},{ca},{gb},{de},{fr},{nl},{se},{ch}" | sudo tee -a /etc/tor/torrc
+          echo "StrictNodes 0" | sudo tee -a /etc/tor/torrc
+          
+          # Start Tor
+          sudo service tor start
+          sleep 10
+          
+          # Verify Tor is running
+          echo "🔍 Checking Tor..."
+          if curl -s --socks5 127.0.0.1:9050 --connect-timeout 15 https://httpbin.org/ip; then
+            echo ""
+            echo "✅ Tor is working!"
+          else
+            echo "⚠️ Tor check failed, restarting..."
+            sudo service tor restart
+            sleep 15
+            curl -s --socks5 127.0.0.1:9050 --connect-timeout 15 https://httpbin.org/ip || echo "Tor may have issues"
+          fi
 
       - name: Install Python packages
         run: |
@@ -55,12 +73,23 @@ jobs:
           pip install --upgrade yt-dlp
           pip install -r requirements.txt
 
+      - name: Show versions and IP
+        run: |
+          echo "yt-dlp: $(yt-dlp --version)"
+          echo "Python: $(python --version)"
+          echo ""
+          echo "Normal IP:"
+          curl -s https://httpbin.org/ip
+          echo ""
+          echo "Tor IP:"
+          curl -s --socks5 127.0.0.1:9050 https://httpbin.org/ip || echo "Tor not ready"
+
       - name: Run pipeline
         env:
           SOURCE_URL: ${{ secrets.SOURCE_URL }}
           YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
-          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '3' }}
           SPEED: ${{ github.event.inputs.speed || '1.05' }}
           PRIVACY: "public"
@@ -69,7 +98,9 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f cookies.txt yt_oauth.json
+        run: |
+          rm -f cookies.txt yt_oauth.json
+          sudo service tor stop || true
 
       - name: Save history
         if: always()
