@@ -35,6 +35,35 @@ def setup_cookies():
     return True
 
 
+# ============ COMMON YT-DLP OPTIONS ============
+def get_base_opts():
+    """Base yt-dlp options that fix bot detection and signature issues."""
+    opts = {
+        'ignoreerrors': True,
+        'retries': 10,
+        'fragment_retries': 10,
+        'extractor_retries': 5,
+        'socket_timeout': 30,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Fetch-Mode': 'navigate',
+        },
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['web', 'android', 'ios'],
+                'player_skip': ['webpage'],
+            }
+        },
+    }
+
+    if os.path.exists(COOKIES_FILE):
+        opts['cookiefile'] = COOKIES_FILE
+
+    return opts
+
+
 # ============ HISTORY ============
 def load_history():
     if os.path.exists(HISTORY_FILE):
@@ -48,35 +77,22 @@ def save_history(vid):
         f.write(vid + "\n")
 
 
-# ============ GET BASE CHANNEL URL ============
+# ============ GET CHANNEL BASE ============
 def get_channel_base(url):
-    """Extract base channel URL from any channel URL format."""
     import re
-    # Handle different URL formats
-    # https://www.youtube.com/@ChannelName/videos
-    # https://www.youtube.com/channel/UCxxxx/videos
-    # https://www.youtube.com/c/ChannelName/videos
-
-    # Remove trailing path like /videos or /shorts
     base = re.sub(r'/(videos|shorts|streams|playlists|community|about|featured)/?$', '', url.strip().rstrip('/'))
     return base
 
 
 # ============ GET ALL VIDEOS + SHORTS ============
 def get_all_content(url):
-    """
-    Fetch ALL videos AND shorts from channel.
-    Scans both /videos and /shorts pages.
-    """
     base_url = get_channel_base(url)
-
     videos_url = base_url + "/videos"
     shorts_url = base_url + "/shorts"
 
     all_content = []
     seen_ids = set()
 
-    # ── Fetch Regular Videos ──
     print(f"\n📹 Scanning regular videos: {videos_url}")
     videos = fetch_playlist(videos_url)
     for v in videos:
@@ -86,7 +102,6 @@ def get_all_content(url):
             seen_ids.add(v['id'])
     print(f"   Found: {len(videos)} regular videos")
 
-    # ── Fetch Shorts/Reels ──
     print(f"\n🎬 Scanning shorts/reels: {shorts_url}")
     shorts = fetch_playlist(shorts_url)
     for s in shorts:
@@ -97,21 +112,13 @@ def get_all_content(url):
     print(f"   Found: {len(shorts)} shorts/reels")
 
     print(f"\n📊 Total content found: {len(all_content)}")
-    print(f"   📹 Videos: {len(videos)}")
-    print(f"   🎬 Shorts: {len(shorts)}")
-
     return all_content
 
 
 def fetch_playlist(url):
-    """Fetch all video entries from a URL."""
-    opts = {
-        'quiet': True,
-        'extract_flat': True,
-        'ignoreerrors': True,
-    }
-    if os.path.exists(COOKIES_FILE):
-        opts['cookiefile'] = COOKIES_FILE
+    opts = get_base_opts()
+    opts['quiet'] = True
+    opts['extract_flat'] = True
 
     try:
         with yt_dlp.YoutubeDL(opts) as y:
@@ -131,77 +138,193 @@ def fetch_playlist(url):
         return []
 
 
-# ============ DOWNLOAD ============
+# ============ DOWNLOAD WITH MULTIPLE FALLBACKS ============
 def download(url, vid):
     os.makedirs("dl", exist_ok=True)
-    opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': f'dl/{vid}.%(ext)s',
-        'merge_output_format': 'mp4',
-        'quiet': False,
-        'retries': 10,
-        'fragment_retries': 10,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-        },
-    }
-    if os.path.exists(COOKIES_FILE):
-        opts['cookiefile'] = COOKIES_FILE
 
-    with yt_dlp.YoutubeDL(opts) as y:
-        info = y.extract_info(url, download=True)
+    # Try multiple format options in order
+    format_options = [
+        'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'bestvideo+bestaudio/best',
+        'best[ext=mp4]/best',
+        'best',
+        'worstvideo+worstaudio/worst',
+    ]
 
-        # Detect if short based on duration and aspect ratio
-        duration = info.get('duration', 0) or 0
-        width = info.get('width', 1920) or 1920
-        height = info.get('height', 1080) or 1080
-        is_short = (duration <= 60) or (height > width)
+    # Try multiple player clients
+    client_options = [
+        ['web', 'android', 'ios'],
+        ['android', 'ios'],
+        ['ios'],
+        ['tv_embedded'],
+        ['web_embedded'],
+        ['mweb'],
+    ]
 
-        return {
-            'id': vid,
-            'title': info.get('title', 'Untitled'),
-            'desc': info.get('description', ''),
-            'tags': info.get('tags', []) or [],
-            'file': f'dl/{vid}.mp4',
-            'duration': duration,
-            'width': width,
-            'height': height,
-            'is_short': is_short,
-        }
+    last_error = None
+
+    for fmt in format_options:
+        for clients in client_options:
+            try:
+                opts = get_base_opts()
+                opts.update({
+                    'format': fmt,
+                    'outtmpl': f'dl/{vid}.%(ext)s',
+                    'merge_output_format': 'mp4',
+                    'quiet': False,
+                    'no_warnings': False,
+                    'ignoreerrors': False,
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': clients,
+                        }
+                    },
+                })
+
+                print(f"   Trying format: {fmt[:40]}... | clients: {clients}")
+
+                with yt_dlp.YoutubeDL(opts) as y:
+                    info = y.extract_info(url, download=True)
+
+                    if info is None:
+                        continue
+
+                    # Find the downloaded file
+                    file_path = f'dl/{vid}.mp4'
+                    if not os.path.exists(file_path):
+                        # Try other extensions
+                        for ext in ['mp4', 'webm', 'mkv', 'flv', 'avi']:
+                            alt_path = f'dl/{vid}.{ext}'
+                            if os.path.exists(alt_path):
+                                # Convert to mp4 if needed
+                                if ext != 'mp4':
+                                    print(f"   Converting {ext} → mp4...")
+                                    convert_cmd = [
+                                        'ffmpeg', '-y', '-i', alt_path,
+                                        '-c:v', 'libx264', '-c:a', 'aac',
+                                        file_path
+                                    ]
+                                    subprocess.run(convert_cmd, capture_output=True)
+                                    os.remove(alt_path)
+                                else:
+                                    file_path = alt_path
+                                break
+
+                    if not os.path.exists(file_path):
+                        print(f"   ⚠️  File not found after download")
+                        continue
+
+                    duration = info.get('duration', 0) or 0
+                    width = info.get('width', 1920) or 1920
+                    height = info.get('height', 1080) or 1080
+                    is_short = (duration <= 60) or (height > width)
+
+                    print(f"   ✅ Download successful!")
+                    return {
+                        'id': vid,
+                        'title': info.get('title', 'Untitled'),
+                        'desc': info.get('description', ''),
+                        'tags': info.get('tags', []) or [],
+                        'file': file_path,
+                        'duration': duration,
+                        'width': width,
+                        'height': height,
+                        'is_short': is_short,
+                    }
+
+            except Exception as e:
+                last_error = str(e)
+                # Clean up partial downloads
+                for ext in ['mp4', 'webm', 'mkv', 'part', 'ytdl']:
+                    p = f'dl/{vid}.{ext}'
+                    if os.path.exists(p):
+                        os.remove(p)
+                continue
+
+    # All attempts failed - try yt-dlp command line as last resort
+    print("   ⚠️  All Python attempts failed. Trying command line...")
+    try:
+        cmd = ['yt-dlp']
+
+        if os.path.exists(COOKIES_FILE):
+            cmd.extend(['--cookies', COOKIES_FILE])
+
+        cmd.extend([
+            '--format', 'best',
+            '--output', f'dl/{vid}.mp4',
+            '--merge-output-format', 'mp4',
+            '--no-check-certificates',
+            '--extractor-args', 'youtube:player_client=android,ios',
+            '--user-agent', 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36',
+            '--retries', '5',
+            url
+        ])
+
+        print(f"   Running: yt-dlp CLI...")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+        if result.returncode == 0 and os.path.exists(f'dl/{vid}.mp4'):
+            # Get basic info
+            probe_cmd = [
+                'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                '-show_format', '-show_streams', f'dl/{vid}.mp4'
+            ]
+            probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+            probe_data = json.loads(probe.stdout) if probe.returncode == 0 else {}
+
+            duration = float(probe_data.get('format', {}).get('duration', 0))
+            width = 1920
+            height = 1080
+            for stream in probe_data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    width = int(stream.get('width', 1920))
+                    height = int(stream.get('height', 1080))
+                    break
+
+            is_short = (duration <= 60) or (height > width)
+
+            print(f"   ✅ CLI download successful!")
+            return {
+                'id': vid,
+                'title': 'Untitled',
+                'desc': '',
+                'tags': [],
+                'file': f'dl/{vid}.mp4',
+                'duration': duration,
+                'width': width,
+                'height': height,
+                'is_short': is_short,
+            }
+        else:
+            print(f"   CLI stderr: {result.stderr[-500:]}")
+
+    except Exception as e:
+        print(f"   CLI also failed: {e}")
+
+    raise Exception(f"All download methods failed for {vid}. Last error: {last_error}")
 
 
-# ============ DETECT VIDEO TYPE ============
+# ============ DETECT TYPE ============
 def detect_type(meta, original_type):
-    """
-    Double check if content is short or regular video.
-    Uses both the URL source and actual video properties.
-    """
-    # If it came from /shorts page, it's a short
     if original_type == 'short':
         return 'short'
-
-    # If duration <= 60s and vertical, it's a short
     if meta.get('is_short', False):
         return 'short'
-
-    # If vertical aspect ratio
     if meta.get('height', 0) > meta.get('width', 0):
         return 'short'
-
     return 'video'
 
 
-# ============ MODIFY VIDEO (Regular) ============
+# ============ MODIFY REGULAR VIDEO ============
 def modify_regular_video(inp, out, speed):
-    """Modify regular horizontal video."""
     os.makedirs("out", exist_ok=True)
 
     vf = ",".join([
         f"setpts=PTS/{speed}",
         "hflip",
         "crop=iw*0.95:ih*0.95",
-        "scale=1920:1080",
+        "scale=1920:1080:force_original_aspect_ratio=decrease",
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
         "eq=brightness=0.04:contrast=1.06:saturation=1.08",
         "colorbalance=rs=0.03:gs=-0.02:bs=0.04",
         "unsharp=5:5:0.8:5:5:0.4",
@@ -225,10 +348,11 @@ def modify_regular_video(inp, out, speed):
         "-crf", "23",
         "-c:a", "aac",
         "-b:a", "192k",
+        "-movflags", "+faststart",
         out
     ]
 
-    print("🔧 Modifying regular video (anti-copyright)...")
+    print("🔧 Modifying regular video...")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(f"FFmpeg stderr: {r.stderr[-1000:]}")
@@ -238,18 +362,14 @@ def modify_regular_video(inp, out, speed):
 
 # ============ MODIFY SHORT/REEL ============
 def modify_short_video(inp, out, speed):
-    """
-    Modify YouTube Short / Reel.
-    Keeps VERTICAL format (1080x1920).
-    Must stay under 60 seconds.
-    """
     os.makedirs("out", exist_ok=True)
 
     vf = ",".join([
         f"setpts=PTS/{speed}",
         "hflip",
         "crop=iw*0.95:ih*0.95",
-        "scale=1080:1920",           # VERTICAL for shorts
+        "scale=1080:1920:force_original_aspect_ratio=decrease",
+        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
         "eq=brightness=0.04:contrast=1.06:saturation=1.08",
         "colorbalance=rs=0.03:gs=-0.02:bs=0.04",
         "unsharp=5:5:0.8:5:5:0.4",
@@ -273,16 +393,17 @@ def modify_short_video(inp, out, speed):
         "-crf", "23",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-t", "59",                  # Force max 59 seconds for shorts
+        "-t", "59",
+        "-movflags", "+faststart",
         out
     ]
 
-    print("🔧 Modifying short/reel (anti-copyright, vertical)...")
+    print("🔧 Modifying short/reel (vertical)...")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(f"FFmpeg stderr: {r.stderr[-1000:]}")
         raise Exception("FFmpeg failed")
-    print("✅ Short/reel modified (vertical 1080x1920)")
+    print("✅ Short/reel modified")
 
 
 # ============ UPLOAD ============
@@ -369,35 +490,30 @@ def main():
         print("❌ SOURCE_URL not set!")
         sys.exit(1)
 
-    # Setup cookies
     print("\n🍪 Setting up cookies...")
     setup_cookies()
 
     history = load_history()
     print(f"📜 Already uploaded: {len(history)} items")
 
-    # Get ALL content (videos + shorts)
     all_content = get_all_content(SOURCE_URL)
 
     if not all_content:
         print("❌ No content found on channel")
         return
 
-    # Filter out already uploaded
     pending = [v for v in all_content if v['id'] not in history]
 
     if not pending:
         print("🎉 ALL content already uploaded! Nothing to do.")
         return
 
-    # Sort order
     if ORDER == "oldest":
         pending.reverse()
         print("📋 Order: Oldest first")
     else:
         print("📋 Order: Newest first")
 
-    # Count types
     pending_videos = len([p for p in pending if p.get('type') == 'video'])
     pending_shorts = len([p for p in pending if p.get('type') == 'short'])
 
@@ -436,7 +552,7 @@ def main():
 
             # ── DETECT TYPE ──
             content_type = detect_type(meta, v.get('type', 'video'))
-            print(f"   Detected as: {'🎬 SHORT/REEL' if content_type == 'short' else '📹 REGULAR VIDEO'}")
+            print(f"   Type: {'🎬 SHORT/REEL' if content_type == 'short' else '📹 REGULAR VIDEO'}")
 
             # ── MODIFY VIDEO ──
             print("\n⚡ Modifying...")
@@ -449,11 +565,8 @@ def main():
 
             # ── MODIFY TITLE ──
             new_title = modify_title(meta['title'])
-
-            # For shorts: add #Shorts to make YouTube recognize as Short
             if content_type == 'short':
                 if '#shorts' not in new_title.lower():
-                    # Keep title under 100 chars
                     if len(new_title) <= 91:
                         new_title = new_title + " #Shorts"
                     else:
@@ -465,8 +578,6 @@ def main():
 
             # ── MODIFY DESCRIPTION ──
             new_desc = modify_description(meta['desc'], new_title)
-
-            # For shorts: add #Shorts at start of description too
             if content_type == 'short':
                 if '#shorts' not in new_desc.lower():
                     new_desc = "#Shorts\n\n" + new_desc
@@ -477,13 +588,10 @@ def main():
 
             # ── MODIFY TAGS ──
             new_tags = modify_tags(meta['tags'])
-
-            # For shorts: add shorts-specific tags
             if content_type == 'short':
                 shorts_tags = ["shorts", "short", "reels", "viral shorts",
                               "trending shorts", "ytshorts", "youtube shorts"]
                 new_tags = new_tags + shorts_tags
-                # Remove duplicates
                 seen = set()
                 unique_tags = []
                 for t in new_tags:
@@ -492,10 +600,8 @@ def main():
                         unique_tags.append(t)
                 new_tags = unique_tags[:30]
 
-            print(f"\n🏷️  Tags: {new_tags[:5]}...")
-
             # ── UPLOAD ──
-            print(f"\n📤 Uploading as {'SHORT/REEL' if content_type == 'short' else 'VIDEO'}...")
+            print(f"\n📤 Uploading as {type_label}...")
             upload_video(yt, out_file, new_title, new_desc, new_tags, PRIVACY)
 
             save_history(v['id'])
@@ -513,21 +619,25 @@ def main():
             print("🗑️  Cleaned up files")
 
             if i < len(batch) - 1:
-                print("⏳ Waiting 30s before next...")
+                print("⏳ Waiting 30s...")
                 time.sleep(30)
 
         except Exception as e:
             print(f"\n❌ ERROR: {e}")
             fail_count += 1
             try:
-                for f in [f"dl/{v['id']}.mp4", f"out/{v['id']}_mod.mp4"]:
-                    if os.path.exists(f):
-                        os.remove(f)
+                for f_path in [f"dl/{v['id']}.mp4", f"out/{v['id']}_mod.mp4"]:
+                    if os.path.exists(f_path):
+                        os.remove(f_path)
+                # Also clean partial downloads
+                for ext in ['webm', 'mkv', 'part', 'ytdl']:
+                    p = f"dl/{v['id']}.{ext}"
+                    if os.path.exists(p):
+                        os.remove(p)
             except:
                 pass
             continue
 
-    # Cleanup cookies
     if os.path.exists(COOKIES_FILE):
         os.remove(COOKIES_FILE)
 
