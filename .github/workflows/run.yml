@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       batch_size:
-        description: 'How many videos per run'
+        description: 'How many items per run (videos + shorts combined)'
         required: false
         default: '3'
       speed:
@@ -56,11 +56,16 @@ jobs:
         env:
           SOURCE_URL: ${{ secrets.SOURCE_URL }}
           YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '3' }}
           SPEED: ${{ github.event.inputs.speed || '1.05' }}
           PRIVACY: "public"
           ORDER: ${{ github.event.inputs.order || 'oldest' }}
         run: python main.py
+
+      - name: Cleanup cookies
+        if: always()
+        run: rm -f cookies.txt
 
       - name: Save history
         if: always()
