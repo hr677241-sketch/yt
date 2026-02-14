@@ -1,19 +1,18 @@
 name: YouTube Auto Pipeline
 
 on:
-  # Manual trigger with options
   workflow_dispatch:
     inputs:
       batch_size:
-        description: 'How many videos to upload this run'
+        description: 'How many videos per run'
         required: false
         default: '3'
       speed:
-        description: 'Speed multiplier (1.05 = 5% faster)'
+        description: 'Speed (1.05 = 5% faster)'
         required: false
         default: '1.05'
       order:
-        description: 'Upload order: oldest or newest first'
+        description: 'Upload order'
         required: false
         default: 'oldest'
         type: choice
@@ -21,7 +20,6 @@ on:
           - oldest
           - newest
 
-  # Auto runs every 8 hours
   schedule:
     - cron: '0 */8 * * *'
 
@@ -36,9 +34,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull latest history
-        run: |
-          git pull origin main || true
+      - name: Pull latest
+        run: git pull origin main || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -63,15 +60,13 @@ jobs:
           SPEED: ${{ github.event.inputs.speed || '1.05' }}
           PRIVACY: "public"
           ORDER: ${{ github.event.inputs.order || 'oldest' }}
-          TITLE_PREFIX: ""
-          TITLE_SUFFIX: " | HD"
         run: python main.py
 
-      - name: Save history to repo
+      - name: Save history
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add history.txt
-          git diff --staged --quiet || git commit -m "✅ uploaded videos [skip ci]"
+          git diff --staged --quiet || git commit -m "uploaded videos [skip ci]"
           git push || true
