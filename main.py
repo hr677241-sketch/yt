@@ -9,19 +9,20 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
+from title_modifier import modify_title
+from description_modifier import modify_description, modify_tags
+
 
 # ============ CONFIG ============
 SOURCE_URL     = os.environ.get("SOURCE_URL", "")
 SPEED          = float(os.environ.get("SPEED", "1.05"))
-BATCH_SIZE     = int(os.environ.get("BATCH_SIZE", "3"))      # videos per run
+BATCH_SIZE     = int(os.environ.get("BATCH_SIZE", "3"))
 PRIVACY        = os.environ.get("PRIVACY", "public")
-TITLE_PREFIX   = os.environ.get("TITLE_PREFIX", "")
-TITLE_SUFFIX   = os.environ.get("TITLE_SUFFIX", " | HD")
 HISTORY_FILE   = "history.txt"
-ORDER          = os.environ.get("ORDER", "oldest")            # oldest or newest
+ORDER          = os.environ.get("ORDER", "oldest")
 
 
-# ============ HISTORY (tracks uploaded videos) ============
+# ============ HISTORY ============
 def load_history():
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE) as f:
@@ -34,25 +35,19 @@ def save_history(vid):
         f.write(vid + "\n")
 
 
-# ============ STEP 1: GET ALL VIDEOS FROM CHANNEL ============
+# ============ GET ALL VIDEOS ============
 def get_all_videos(url):
-    """
-    Fetch ALL videos from a channel/playlist — no limit.
-    Returns complete list of every video on the channel.
-    """
     opts = {
         'quiet': True,
         'extract_flat': True,
         'ignoreerrors': True,
     }
-
     print(f"🔍 Scanning entire channel: {url}")
     print("   (This may take a minute for large channels...)")
 
     with yt_dlp.YoutubeDL(opts) as y:
         info = y.extract_info(url, download=False)
         entries = info.get('entries', [])
-
         all_videos = []
         for e in entries:
             if e and e.get('id'):
@@ -61,12 +56,11 @@ def get_all_videos(url):
                     'url': f"https://www.youtube.com/watch?v={e['id']}",
                     'title': e.get('title', 'Untitled'),
                 })
-
         print(f"📊 Total videos found on channel: {len(all_videos)}")
         return all_videos
 
 
-# ============ STEP 2: DOWNLOAD ============
+# ============ DOWNLOAD ============
 def download(url, vid):
     os.makedirs("dl", exist_ok=True)
     opts = {
@@ -86,11 +80,10 @@ def download(url, vid):
         }
 
 
-# ============ STEP 3: MODIFY VIDEO (Anti Copyright) ============
+# ============ MODIFY VIDEO ============
 def modify_video(inp, out, speed):
     os.makedirs("out", exist_ok=True)
 
-    # Video filters - all anti-copyright tricks
     vf = ",".join([
         f"setpts=PTS/{speed}",
         "hflip",
@@ -101,7 +94,6 @@ def modify_video(inp, out, speed):
         "unsharp=5:5:0.8:5:5:0.4",
     ])
 
-    # Audio filters - break audio fingerprint
     af = ",".join([
         f"atempo={speed}",
         "asetrate=44100*1.02",
@@ -131,7 +123,7 @@ def modify_video(inp, out, speed):
     print("✅ Video modified successfully")
 
 
-# ============ STEP 4: UPLOAD ============
+# ============ UPLOAD ============
 def get_youtube():
     token_str = os.environ.get("YOUTUBE_TOKEN", "")
     if not token_str:
@@ -190,7 +182,6 @@ def upload_video(yt, path, title, desc, tags, privacy):
                 retry += 1
                 if retry > 10:
                     raise
-                print(f"   Retrying in {2**retry}s...")
                 time.sleep(2 ** retry)
                 continue
             raise
@@ -216,27 +207,23 @@ def main():
         print("❌ SOURCE_URL not set!")
         sys.exit(1)
 
-    # Load history of already uploaded videos
     history = load_history()
     print(f"📜 Already uploaded: {len(history)} videos")
 
-    # Get ALL videos from channel
     all_videos = get_all_videos(SOURCE_URL)
 
     if not all_videos:
         print("❌ No videos found on channel")
         return
 
-    # Filter out already uploaded
     pending = [v for v in all_videos if v['id'] not in history]
 
     if not pending:
         print("🎉 ALL videos already uploaded! Nothing to do.")
         return
 
-    # Sort order
     if ORDER == "oldest":
-        pending.reverse()    # oldest first (bottom of list = oldest)
+        pending.reverse()
         print("📋 Order: Oldest first")
     else:
         print("📋 Order: Newest first")
@@ -246,10 +233,7 @@ def main():
     print(f"⏳ Remaining:         {len(pending)}")
     print(f"📦 This batch:        {min(BATCH_SIZE, len(pending))}")
 
-    # Take only BATCH_SIZE for this run
     batch = pending[:BATCH_SIZE]
-
-    # Connect to YouTube
     yt = get_youtube()
 
     success_count = 0
@@ -257,46 +241,54 @@ def main():
 
     for i, v in enumerate(batch):
         try:
-            print(f"\n{'=' * 50}")
+            print(f"\n{'=' * 60}")
             print(f"📹 [{i+1}/{len(batch)}] {v['title']}")
             print(f"   ID: {v['id']}")
-            print(f"{'=' * 50}")
+            print(f"{'=' * 60}")
 
-            # Download
+            # ── DOWNLOAD ──
             print("\n⬇️  Downloading...")
             meta = download(v['url'], v['id'])
             file_size = os.path.getsize(meta['file']) / (1024 * 1024)
             print(f"   File size: {file_size:.1f} MB")
 
-            # Modify
+            # ── MODIFY VIDEO ──
             print("\n⚡ Modifying video...")
             out_file = f"out/{v['id']}_mod.mp4"
             modify_video(meta['file'], out_file, SPEED)
 
-            # Change metadata
-            new_title = TITLE_PREFIX + meta['title'] + TITLE_SUFFIX
-            new_desc = (
-                meta['desc'][:1000] + "\n\n"
-                "Like & Subscribe for more!\n"
-                "#trending #viral"
-            )
+            # ── MODIFY TITLE ──
+            new_title = modify_title(meta['title'])
+            print(f"\n📝 Title changed:")
+            print(f"   BEFORE: {meta['title']}")
+            print(f"   AFTER:  {new_title}")
 
-            # Upload
+            # ── MODIFY DESCRIPTION ──
+            new_desc = modify_description(meta['desc'], new_title)
+            print(f"\n📝 Description changed:")
+            print(f"   BEFORE: {meta['desc'][:80]}...")
+            print(f"   AFTER:  {new_desc[:80]}...")
+
+            # ── MODIFY TAGS ──
+            new_tags = modify_tags(meta['tags'])
+            print(f"\n🏷️  Tags changed:")
+            print(f"   BEFORE: {meta['tags'][:5]}")
+            print(f"   AFTER:  {new_tags[:5]}")
+
+            # ── UPLOAD ──
             print("\n📤 Uploading to Channel B...")
-            upload_video(yt, out_file, new_title, new_desc, meta['tags'], PRIVACY)
+            upload_video(yt, out_file, new_title, new_desc, new_tags, PRIVACY)
 
-            # Mark as done
             save_history(v['id'])
             success_count += 1
 
-            # Cleanup disk space immediately
+            # Cleanup
             if os.path.exists(meta['file']):
                 os.remove(meta['file'])
             if os.path.exists(out_file):
                 os.remove(out_file)
             print("🗑️  Cleaned up files")
 
-            # Small delay between uploads
             if i < len(batch) - 1:
                 print("⏳ Waiting 30s before next video...")
                 time.sleep(30)
@@ -304,7 +296,6 @@ def main():
         except Exception as e:
             print(f"\n❌ ERROR: {e}")
             fail_count += 1
-            # Cleanup on error
             try:
                 for f in [f"dl/{v['id']}.mp4", f"out/{v['id']}_mod.mp4"]:
                     if os.path.exists(f):
@@ -313,7 +304,6 @@ def main():
                 pass
             continue
 
-    # Final summary
     remaining = len(pending) - success_count
     print(f"\n{'=' * 60}")
     print(f"📊 BATCH SUMMARY")
@@ -323,7 +313,7 @@ def main():
     print(f"   ⏳ Remaining:  {remaining}")
     if remaining > 0:
         print(f"   ⏰ Next run will process {min(BATCH_SIZE, remaining)} more")
-        print(f"   💡 All videos will be done in ~{remaining // BATCH_SIZE + 1} more runs")
+        print(f"   💡 All done in ~{remaining // BATCH_SIZE + 1} more runs")
     else:
         print(f"   🎉 ALL VIDEOS UPLOADED!")
     print(f"{'=' * 60}")
