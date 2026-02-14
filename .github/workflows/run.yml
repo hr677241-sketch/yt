@@ -46,13 +46,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg nodejs npm
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
 
       - name: Install Python packages
         run: |
           pip install --upgrade pip
           pip install --upgrade yt-dlp
           pip install -r requirements.txt
-          echo "yt-dlp version: $(yt-dlp --version)"
 
       - name: Run pipeline
         env:
@@ -60,7 +61,6 @@ jobs:
           YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-          YTDLP_OAUTH_TOKEN: ${{ secrets.YTDLP_OAUTH_TOKEN }}
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '3' }}
           SPEED: ${{ github.event.inputs.speed || '1.05' }}
           PRIVACY: "public"
