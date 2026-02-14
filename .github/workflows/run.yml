@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       batch_size:
-        description: 'How many items per run (videos + shorts combined)'
+        description: 'How many items per run'
         required: false
         default: '3'
       speed:
@@ -42,15 +42,27 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install FFmpeg
+      - name: Install FFmpeg + Node.js
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg nodejs npm
 
       - name: Install Python packages
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+          pip install --upgrade yt-dlp
+
+      - name: Verify versions
+        run: |
+          echo "yt-dlp version:"
+          yt-dlp --version
+          echo "ffmpeg version:"
+          ffmpeg -version | head -1
+          echo "node version:"
+          node --version
+          echo "python version:"
+          python --version
 
       - name: Run pipeline
         env:
