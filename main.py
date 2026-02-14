@@ -3,7 +3,9 @@ import sys
 import json
 import time
 import subprocess
+import requests
 import base64
+import re
 import yt_dlp
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -15,103 +17,61 @@ from description_modifier import modify_description, modify_tags
 
 
 # ============ CONFIG ============
-SOURCE_URL     = os.environ.get("SOURCE_URL", "")
-SPEED          = float(os.environ.get("SPEED", "1.05"))
-BATCH_SIZE     = int(os.environ.get("BATCH_SIZE", "3"))
-PRIVACY        = os.environ.get("PRIVACY", "public")
-HISTORY_FILE   = "history.txt"
-ORDER          = os.environ.get("ORDER", "oldest")
-COOKIES_FILE   = "cookies.txt"
-OAUTH_FILE     = "yt_oauth.json"
+SOURCE_URL   = os.environ.get("SOURCE_URL", "")
+SPEED        = float(os.environ.get("SPEED", "1.05"))
+BATCH_SIZE   = int(os.environ.get("BATCH_SIZE", "3"))
+PRIVACY      = os.environ.get("PRIVACY", "public")
+HISTORY_FILE = "history.txt"
+ORDER        = os.environ.get("ORDER", "oldest")
+COOKIES_FILE = "cookies.txt"
+
+# Piped API instances (free YouTube proxies)
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.adminforge.de",
+    "https://pipedapi.in.projectsegfau.lt",
+    "https://api.piped.projectsegfau.lt",
+    "https://pipedapi.r4fo.com",
+    "https://pipedapi.leptons.xyz",
+]
+
+# Invidious API instances (another free YouTube proxy)
+INVIDIOUS_INSTANCES = [
+    "https://inv.nadeko.net",
+    "https://invidious.nerdvpn.de",
+    "https://invidious.jing.rocks",
+    "https://invidious.privacyredirect.com",
+    "https://iv.melmac.space",
+    "https://invidious.protokoll-11.de",
+]
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+}
 
 
-# ============ SETUP AUTH ============
-def setup_auth():
-    """Setup authentication — tries 3 methods."""
-    
-    method_used = None
-    
-    # Method 1: Base64 encoded cookies (BEST)
+# ============ SETUP COOKIES ============
+def setup_cookies():
     cookies_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
     if cookies_b64:
         try:
             decoded = base64.b64decode(cookies_b64)
             with open(COOKIES_FILE, "wb") as f:
                 f.write(decoded)
-            print("🍪 Auth Method: Base64 Cookies ✅")
-            # Verify file
-            size = os.path.getsize(COOKIES_FILE)
-            print(f"   Cookie file size: {size} bytes")
-            with open(COOKIES_FILE, "r") as f:
-                lines = f.readlines()
-                cookie_count = len([l for l in lines if l.strip() and not l.startswith('#')])
-                print(f"   Cookie entries: {cookie_count}")
-            method_used = "cookies_b64"
-            return method_used
-        except Exception as e:
-            print(f"   ⚠️ Base64 decode failed: {e}")
+            print("🍪 Cookies loaded (base64)")
+            return True
+        except:
+            pass
 
-    # Method 2: Raw cookies (may have formatting issues)
     cookies_raw = os.environ.get("YOUTUBE_COOKIES", "")
     if cookies_raw:
         with open(COOKIES_FILE, "w") as f:
             f.write(cookies_raw)
-        print("🍪 Auth Method: Raw Cookies")
-        size = os.path.getsize(COOKIES_FILE)
-        print(f"   Cookie file size: {size} bytes")
-        method_used = "cookies_raw"
-        return method_used
+        print("🍪 Cookies loaded (raw)")
+        return True
 
-    # Method 3: yt-dlp OAuth token
-    oauth_token = os.environ.get("YTDLP_OAUTH_TOKEN", "")
-    if oauth_token:
-        with open(OAUTH_FILE, "w") as f:
-            f.write(oauth_token)
-        print("🔑 Auth Method: yt-dlp OAuth Token ✅")
-        method_used = "oauth"
-        return method_used
-
-    print("⚠️  No authentication method found!")
-    print("   Add one of these GitHub secrets:")
-    print("   - YOUTUBE_COOKIES_B64 (recommended)")
-    print("   - YOUTUBE_COOKIES")
-    print("   - YTDLP_OAUTH_TOKEN")
-    return None
-
-
-# ============ COMMON YT-DLP OPTIONS ============
-def get_ytdlp_opts():
-    """Build yt-dlp options with best auth method."""
-    opts = {
-        'ignoreerrors': True,
-        'retries': 10,
-        'fragment_retries': 10,
-        'extractor_retries': 5,
-        'socket_timeout': 30,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-        },
-    }
-
-    # Add cookies if file exists and has content
-    if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
-        opts['cookiefile'] = COOKIES_FILE
-
-    # Add OAuth if file exists
-    if os.path.exists(OAUTH_FILE):
-        # yt-dlp uses this automatically if placed in right location
-        config_dir = os.path.expanduser("~/.config/yt-dlp")
-        os.makedirs(config_dir, exist_ok=True)
-        target = os.path.join(config_dir, "youtube-oauth2-token.json")
-        if not os.path.exists(target):
-            import shutil
-            shutil.copy(OAUTH_FILE, target)
-        opts['username'] = 'oauth2'
-        opts['password'] = ''
-
-    return opts
+    print("⚠️  No cookies (will use proxy APIs)")
+    return False
 
 
 # ============ HISTORY ============
@@ -127,287 +87,664 @@ def save_history(vid):
         f.write(vid + "\n")
 
 
-# ============ GET CHANNEL BASE ============
+# ============ GET CHANNEL VIDEOS ============
 def get_channel_base(url):
-    import re
     base = re.sub(r'/(videos|shorts|streams|playlists|community|about|featured)/?$', '', url.strip().rstrip('/'))
     return base
 
 
-# ============ GET ALL CONTENT ============
 def get_all_content(url):
+    """Get all videos + shorts using Piped/Invidious API (not blocked)."""
     base_url = get_channel_base(url)
-    videos_url = base_url + "/videos"
-    shorts_url = base_url + "/shorts"
+
+    # Extract channel identifier
+    channel_id = extract_channel_id(base_url)
 
     all_content = []
     seen_ids = set()
 
-    print(f"\n📹 Scanning regular videos...")
-    videos = fetch_playlist(videos_url)
-    for v in videos:
-        if v['id'] not in seen_ids:
-            v['type'] = 'video'
-            all_content.append(v)
-            seen_ids.add(v['id'])
-    print(f"   Found: {len(videos)} regular videos")
+    # Method 1: Try Piped API
+    print("\n🔍 Fetching channel content via Piped API...")
+    piped_videos = get_videos_piped(channel_id)
+    if piped_videos:
+        for v in piped_videos:
+            if v['id'] not in seen_ids:
+                all_content.append(v)
+                seen_ids.add(v['id'])
+        print(f"   ✅ Found {len(piped_videos)} items via Piped")
 
-    print(f"\n🎬 Scanning shorts/reels...")
-    shorts = fetch_playlist(shorts_url)
-    for s in shorts:
-        if s['id'] not in seen_ids:
-            s['type'] = 'short'
-            all_content.append(s)
-            seen_ids.add(s['id'])
-    print(f"   Found: {len(shorts)} shorts/reels")
+    # Method 2: Try Invidious API
+    if not all_content:
+        print("   Piped failed. Trying Invidious API...")
+        inv_videos = get_videos_invidious(channel_id)
+        if inv_videos:
+            for v in inv_videos:
+                if v['id'] not in seen_ids:
+                    all_content.append(v)
+                    seen_ids.add(v['id'])
+            print(f"   ✅ Found {len(inv_videos)} items via Invidious")
 
-    print(f"\n📊 Total content: {len(all_content)}")
+    # Method 3: Fallback to yt-dlp (might work for listing even if download fails)
+    if not all_content:
+        print("   APIs failed. Trying yt-dlp for listing...")
+        all_content = get_videos_ytdlp(base_url)
+
+    print(f"\n📊 Total content found: {len(all_content)}")
     return all_content
 
 
-def fetch_playlist(url):
-    opts = get_ytdlp_opts()
-    opts['quiet'] = True
-    opts['extract_flat'] = True
+def extract_channel_id(url):
+    """Extract channel ID or handle from URL."""
+    # https://www.youtube.com/@ChannelName
+    match = re.search(r'youtube\.com/@([^/\s?]+)', url)
+    if match:
+        return "@" + match.group(1)
 
-    try:
-        with yt_dlp.YoutubeDL(opts) as y:
-            info = y.extract_info(url, download=False)
-            entries = info.get('entries', [])
-            return [
-                {
-                    'id': e['id'],
-                    'url': f"https://www.youtube.com/watch?v={e['id']}",
-                    'title': e.get('title', 'Untitled'),
-                }
-                for e in entries if e and e.get('id')
-            ]
-    except Exception as ex:
-        print(f"   ⚠️ Error: {ex}")
-        return []
+    # https://www.youtube.com/channel/UCxxxxx
+    match = re.search(r'youtube\.com/channel/([^/\s?]+)', url)
+    if match:
+        return match.group(1)
+
+    # https://www.youtube.com/c/ChannelName
+    match = re.search(r'youtube\.com/c/([^/\s?]+)', url)
+    if match:
+        return match.group(1)
+
+    return url
 
 
-# ============ DOWNLOAD WITH FALLBACKS ============
-def download(url, vid):
-    os.makedirs("dl", exist_ok=True)
+def get_videos_piped(channel_id):
+    """Get videos from Piped API."""
+    videos = []
 
-    # Strategy: try different combinations
-    strategies = [
-        {
-            'name': 'Default + cookies',
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'extra': {},
-        },
-        {
-            'name': 'Android client',
-            'format': 'best[ext=mp4]/best',
-            'extra': {
-                'extractor_args': {'youtube': {'player_client': ['android']}},
-            },
-        },
-        {
-            'name': 'iOS client',
-            'format': 'best',
-            'extra': {
-                'extractor_args': {'youtube': {'player_client': ['ios']}},
-            },
-        },
-        {
-            'name': 'TV embedded',
-            'format': 'best',
-            'extra': {
-                'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
-            },
-        },
-        {
-            'name': 'Media connect',
-            'format': 'best',
-            'extra': {
-                'extractor_args': {'youtube': {'player_client': ['mediaconnect']}},
-            },
-        },
-    ]
-
-    last_error = None
-
-    for strategy in strategies:
+    for instance in PIPED_INSTANCES:
         try:
-            # Clean up any previous partial download
-            for ext in ['mp4', 'webm', 'mkv', 'part', 'ytdl', 'f*']:
-                p = f'dl/{vid}.{ext}'
-                if os.path.exists(p):
-                    os.remove(p)
-
-            opts = get_ytdlp_opts()
-            opts.update({
-                'format': strategy['format'],
-                'outtmpl': f'dl/{vid}.%(ext)s',
-                'merge_output_format': 'mp4',
-                'quiet': False,
-                'no_warnings': False,
-                'ignoreerrors': False,
-            })
-            opts.update(strategy.get('extra', {}))
-
-            print(f"\n   🔄 Trying: {strategy['name']}...")
-
-            with yt_dlp.YoutubeDL(opts) as y:
-                info = y.extract_info(url, download=True)
-
-                if info is None:
-                    print(f"   ⚠️ No info returned")
+            # Handle @username vs channel ID
+            if channel_id.startswith("@"):
+                # Search for channel first
+                search_url = f"{instance}/search?q={channel_id}&filter=channels"
+                r = requests.get(search_url, headers=HEADERS, timeout=15)
+                if r.status_code == 200:
+                    data = r.json()
+                    items = data.get('items', [])
+                    if items:
+                        ch_url = items[0].get('url', '')
+                        channel_id_resolved = ch_url.replace('/channel/', '')
+                    else:
+                        continue
+                else:
                     continue
+            else:
+                channel_id_resolved = channel_id
 
-                # Find downloaded file
-                file_path = None
-                for ext in ['mp4', 'webm', 'mkv', 'flv', 'avi', '3gp']:
-                    p = f'dl/{vid}.{ext}'
-                    if os.path.exists(p):
-                        file_path = p
+            # Get channel videos
+            api_url = f"{instance}/channel/{channel_id_resolved}"
+            r = requests.get(api_url, headers=HEADERS, timeout=15)
+
+            if r.status_code != 200:
+                continue
+
+            data = r.json()
+            related = data.get('relatedStreams', [])
+
+            for item in related:
+                vid_url = item.get('url', '')
+                vid_id = vid_url.replace('/watch?v=', '')
+                if vid_id:
+                    duration = item.get('duration', 0)
+                    is_short = item.get('isShort', False) or (duration > 0 and duration <= 60)
+
+                    videos.append({
+                        'id': vid_id,
+                        'url': f"https://www.youtube.com/watch?v={vid_id}",
+                        'title': item.get('title', 'Untitled'),
+                        'type': 'short' if is_short else 'video',
+                        'duration': duration,
+                    })
+
+            # Get next pages
+            nextpage = data.get('nextpage')
+            page_count = 0
+            while nextpage and page_count < 20:
+                try:
+                    np_url = f"{instance}/nextpage/channel/{channel_id_resolved}?nextpage={requests.utils.quote(nextpage)}"
+                    r = requests.get(np_url, headers=HEADERS, timeout=15)
+                    if r.status_code != 200:
                         break
+                    data = r.json()
+                    for item in data.get('relatedStreams', []):
+                        vid_url = item.get('url', '')
+                        vid_id = vid_url.replace('/watch?v=', '')
+                        if vid_id and vid_id not in [v['id'] for v in videos]:
+                            duration = item.get('duration', 0)
+                            is_short = item.get('isShort', False) or (duration > 0 and duration <= 60)
+                            videos.append({
+                                'id': vid_id,
+                                'url': f"https://www.youtube.com/watch?v={vid_id}",
+                                'title': item.get('title', 'Untitled'),
+                                'type': 'short' if is_short else 'video',
+                                'duration': duration,
+                            })
+                    nextpage = data.get('nextpage')
+                    page_count += 1
+                except:
+                    break
 
-                if not file_path:
-                    print(f"   ⚠️ No file found after download")
-                    continue
-
-                # Convert to mp4 if needed
-                if not file_path.endswith('.mp4'):
-                    mp4_path = f'dl/{vid}.mp4'
-                    print(f"   Converting to mp4...")
-                    cmd = ['ffmpeg', '-y', '-i', file_path,
-                           '-c:v', 'libx264', '-c:a', 'aac', mp4_path]
-                    subprocess.run(cmd, capture_output=True)
-                    if os.path.exists(mp4_path):
-                        os.remove(file_path)
-                        file_path = mp4_path
-
-                duration = info.get('duration', 0) or 0
-                width = info.get('width', 0) or 0
-                height = info.get('height', 0) or 0
-
-                # Get dimensions from ffprobe if missing
-                if width == 0 or height == 0:
-                    width, height, duration = get_video_info(file_path)
-
-                is_short = (duration <= 60) or (height > width)
-
-                print(f"   ✅ Download OK! ({os.path.getsize(file_path)/1024/1024:.1f} MB)")
-                return {
-                    'id': vid,
-                    'title': info.get('title', 'Untitled'),
-                    'desc': info.get('description', ''),
-                    'tags': info.get('tags', []) or [],
-                    'file': file_path,
-                    'duration': duration,
-                    'width': width,
-                    'height': height,
-                    'is_short': is_short,
-                }
+            if videos:
+                return videos
 
         except Exception as e:
-            last_error = str(e)
-            print(f"   ❌ Failed: {str(e)[:100]}")
+            print(f"   ⚠️ {instance}: {str(e)[:50]}")
             continue
 
-    # LAST RESORT: yt-dlp command line
-    print(f"\n   🔄 Trying: Command line (last resort)...")
-    try:
-        result = try_cli_download(url, vid)
-        if result:
-            return result
-    except Exception as e:
-        last_error = str(e)
-
-    raise Exception(f"All download methods failed for {vid}: {last_error}")
+    return videos
 
 
-def try_cli_download(url, vid):
-    """Try downloading via yt-dlp command line."""
-    # Clean up
-    for ext in ['mp4', 'webm', 'mkv', 'part']:
+def get_videos_invidious(channel_id):
+    """Get videos from Invidious API."""
+    videos = []
+
+    for instance in INVIDIOUS_INSTANCES:
+        try:
+            if channel_id.startswith("@"):
+                search_url = f"{instance}/api/v1/search?q={channel_id}&type=channel"
+                r = requests.get(search_url, headers=HEADERS, timeout=15)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data:
+                        channel_id_resolved = data[0].get('authorId', '')
+                    else:
+                        continue
+                else:
+                    continue
+            else:
+                channel_id_resolved = channel_id
+
+            # Get videos
+            for page in range(1, 15):
+                api_url = f"{instance}/api/v1/channels/{channel_id_resolved}/videos?page={page}"
+                r = requests.get(api_url, headers=HEADERS, timeout=15)
+
+                if r.status_code != 200:
+                    break
+
+                data = r.json()
+                if not data:
+                    break
+
+                for item in data:
+                    vid_id = item.get('videoId', '')
+                    if vid_id and vid_id not in [v['id'] for v in videos]:
+                        duration = item.get('lengthSeconds', 0)
+                        videos.append({
+                            'id': vid_id,
+                            'url': f"https://www.youtube.com/watch?v={vid_id}",
+                            'title': item.get('title', 'Untitled'),
+                            'type': 'short' if duration <= 60 else 'video',
+                            'duration': duration,
+                        })
+
+            # Also get shorts
+            for page in range(1, 15):
+                api_url = f"{instance}/api/v1/channels/{channel_id_resolved}/shorts?page={page}"
+                r = requests.get(api_url, headers=HEADERS, timeout=15)
+
+                if r.status_code != 200:
+                    break
+
+                data = r.json()
+                if not data:
+                    break
+
+                for item in data:
+                    vid_id = item.get('videoId', '')
+                    if vid_id and vid_id not in [v['id'] for v in videos]:
+                        videos.append({
+                            'id': vid_id,
+                            'url': f"https://www.youtube.com/watch?v={vid_id}",
+                            'title': item.get('title', 'Untitled'),
+                            'type': 'short',
+                            'duration': item.get('lengthSeconds', 0),
+                        })
+
+            if videos:
+                return videos
+
+        except Exception as e:
+            print(f"   ⚠️ {instance}: {str(e)[:50]}")
+            continue
+
+    return videos
+
+
+def get_videos_ytdlp(base_url):
+    """Fallback: get video list via yt-dlp."""
+    videos = []
+    opts = {
+        'quiet': True,
+        'extract_flat': True,
+        'ignoreerrors': True,
+    }
+    if os.path.exists(COOKIES_FILE):
+        opts['cookiefile'] = COOKIES_FILE
+
+    for page_url in [base_url + "/videos", base_url + "/shorts"]:
+        try:
+            vtype = 'short' if '/shorts' in page_url else 'video'
+            with yt_dlp.YoutubeDL(opts) as y:
+                info = y.extract_info(page_url, download=False)
+                for e in info.get('entries', []):
+                    if e and e.get('id'):
+                        videos.append({
+                            'id': e['id'],
+                            'url': f"https://www.youtube.com/watch?v={e['id']}",
+                            'title': e.get('title', 'Untitled'),
+                            'type': vtype,
+                        })
+        except:
+            pass
+
+    return videos
+
+
+# ============ DOWNLOAD VIDEO (PROXY METHODS) ============
+def download(url, vid, content_type='video'):
+    """Download video using proxy APIs — bypasses YouTube IP block."""
+    os.makedirs("dl", exist_ok=True)
+    file_path = f"dl/{vid}.mp4"
+
+    # Clean previous
+    for ext in ['mp4', 'webm', 'mkv', 'part', 'f251.webm', 'f140.m4a']:
         p = f'dl/{vid}.{ext}'
         if os.path.exists(p):
             os.remove(p)
 
-    cmd = ['yt-dlp',
-           '--format', 'best',
-           '--output', f'dl/{vid}.%(ext)s',
-           '--merge-output-format', 'mp4',
-           '--no-check-certificates',
-           '--retries', '5',
-           '--user-agent', 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36',
-           ]
+    meta = {'id': vid, 'title': 'Untitled', 'desc': '', 'tags': [],
+            'file': file_path, 'duration': 0, 'width': 1920,
+            'height': 1080, 'is_short': content_type == 'short'}
 
-    # Add cookies
-    if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
-        cmd.extend(['--cookies', COOKIES_FILE])
+    # Method 1: Download via Piped
+    print("   🔄 Method 1: Piped proxy...")
+    result = download_via_piped(vid, file_path)
+    if result:
+        meta.update(result)
+        meta['file'] = file_path
+        return meta
 
-    # Add OAuth
-    if os.path.exists(OAUTH_FILE):
-        cmd.extend(['--username', 'oauth2', '--password', ''])
+    # Method 2: Download via Invidious
+    print("   🔄 Method 2: Invidious proxy...")
+    result = download_via_invidious(vid, file_path)
+    if result:
+        meta.update(result)
+        meta['file'] = file_path
+        return meta
 
-    # Try different clients
-    for client in ['android', 'ios', 'tv_embedded', 'mediaconnect']:
+    # Method 3: Download via Cobalt
+    print("   🔄 Method 3: Cobalt API...")
+    result = download_via_cobalt(vid, file_path)
+    if result:
+        meta.update(result)
+        meta['file'] = file_path
+        return meta
+
+    # Method 4: yt-dlp with cookies (might work sometimes)
+    print("   🔄 Method 4: yt-dlp direct (last resort)...")
+    result = download_via_ytdlp(url, vid, file_path)
+    if result:
+        meta.update(result)
+        meta['file'] = file_path
+        return meta
+
+    raise Exception(f"All 4 download methods failed for {vid}")
+
+
+def download_via_piped(vid, output_path):
+    """Download video + audio from Piped and merge with FFmpeg."""
+    for instance in PIPED_INSTANCES:
         try:
-            full_cmd = cmd + [
-                '--extractor-args', f'youtube:player_client={client}',
-                url
-            ]
-            print(f"   CLI with {client} client...")
-            result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=300)
+            api_url = f"{instance}/streams/{vid}"
+            r = requests.get(api_url, headers=HEADERS, timeout=20)
 
-            # Find file
-            file_path = None
-            for ext in ['mp4', 'webm', 'mkv']:
-                p = f'dl/{vid}.{ext}'
-                if os.path.exists(p):
-                    file_path = p
+            if r.status_code != 200:
+                continue
+
+            data = r.json()
+            title = data.get('title', 'Untitled')
+            desc = data.get('description', '')
+            duration = data.get('duration', 0)
+
+            # Get video streams
+            video_streams = data.get('videoStreams', [])
+            audio_streams = data.get('audioStreams', [])
+
+            if not video_streams:
+                continue
+
+            # Pick best video (mp4 preferred, highest quality)
+            best_video = None
+            for s in sorted(video_streams, key=lambda x: x.get('height', 0) or 0, reverse=True):
+                if s.get('videoOnly', False) is False and s.get('url'):
+                    best_video = s
                     break
 
-            if file_path:
-                # Convert if needed
-                if not file_path.endswith('.mp4'):
-                    mp4_path = f'dl/{vid}.mp4'
-                    subprocess.run(['ffmpeg', '-y', '-i', file_path,
-                                   '-c:v', 'libx264', '-c:a', 'aac', mp4_path],
-                                  capture_output=True)
-                    if os.path.exists(mp4_path):
-                        os.remove(file_path)
-                        file_path = mp4_path
+            # If only video-only streams, get separate audio
+            if not best_video:
+                for s in sorted(video_streams, key=lambda x: x.get('height', 0) or 0, reverse=True):
+                    if s.get('url'):
+                        best_video = s
+                        break
 
-                if os.path.exists(file_path):
-                    width, height, duration = get_video_info(file_path)
-                    is_short = (duration <= 60) or (height > width)
+            if not best_video:
+                continue
 
-                    print(f"   ✅ CLI download OK!")
-                    return {
-                        'id': vid,
-                        'title': 'Untitled',
-                        'desc': '',
-                        'tags': [],
-                        'file': file_path,
-                        'duration': duration,
-                        'width': width,
-                        'height': height,
-                        'is_short': is_short,
-                    }
+            video_url = best_video['url']
+            height = best_video.get('height', 1080) or 1080
+            width = best_video.get('width', 1920) or 1920
 
-        except subprocess.TimeoutExpired:
-            print(f"   Timeout with {client}")
+            # Check if video-only (needs separate audio)
+            needs_audio = best_video.get('videoOnly', False)
+
+            if needs_audio and audio_streams:
+                # Get best audio
+                best_audio = None
+                for s in sorted(audio_streams, key=lambda x: x.get('bitrate', 0) or 0, reverse=True):
+                    if s.get('url'):
+                        best_audio = s
+                        break
+
+                if best_audio:
+                    # Download video and audio separately, then merge
+                    video_tmp = f"dl/{vid}_v.tmp"
+                    audio_tmp = f"dl/{vid}_a.tmp"
+
+                    print(f"   Downloading video from {instance}...")
+                    download_file(video_url, video_tmp)
+                    print(f"   Downloading audio...")
+                    download_file(best_audio['url'], audio_tmp)
+
+                    # Merge
+                    print(f"   Merging video + audio...")
+                    cmd = ['ffmpeg', '-y', '-i', video_tmp, '-i', audio_tmp,
+                           '-c:v', 'copy', '-c:a', 'aac', '-strict', 'experimental',
+                           output_path]
+                    subprocess.run(cmd, capture_output=True)
+
+                    # Cleanup
+                    for f in [video_tmp, audio_tmp]:
+                        if os.path.exists(f):
+                            os.remove(f)
+                else:
+                    # No audio available, download video only
+                    print(f"   Downloading from {instance}...")
+                    download_file(video_url, output_path)
+            else:
+                # Video has audio included
+                print(f"   Downloading from {instance}...")
+                download_file(video_url, output_path)
+
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                # Ensure mp4 format
+                ensure_mp4(output_path)
+
+                # Get actual dimensions
+                w, h, dur = get_video_info(output_path)
+
+                print(f"   ✅ Piped download OK! ({os.path.getsize(output_path)/1024/1024:.1f} MB)")
+                return {
+                    'title': title,
+                    'desc': desc,
+                    'tags': data.get('tags', []) or [],
+                    'duration': dur or duration,
+                    'width': w or width,
+                    'height': h or height,
+                    'is_short': (duration <= 60) or (h > w if h and w else height > width),
+                }
+
         except Exception as e:
-            print(f"   Error with {client}: {e}")
-
-        # Clean partial
-        for ext in ['mp4', 'webm', 'mkv', 'part']:
-            p = f'dl/{vid}.{ext}'
-            if os.path.exists(p):
-                os.remove(p)
+            print(f"   ⚠️ {instance}: {str(e)[:60]}")
+            # Cleanup
+            for f in [output_path, f"dl/{vid}_v.tmp", f"dl/{vid}_a.tmp"]:
+                if os.path.exists(f):
+                    os.remove(f)
+            continue
 
     return None
 
 
+def download_via_invidious(vid, output_path):
+    """Download from Invidious API."""
+    for instance in INVIDIOUS_INSTANCES:
+        try:
+            api_url = f"{instance}/api/v1/videos/{vid}"
+            r = requests.get(api_url, headers=HEADERS, timeout=20)
+
+            if r.status_code != 200:
+                continue
+
+            data = r.json()
+            title = data.get('title', 'Untitled')
+            desc = data.get('description', '')
+            duration = data.get('lengthSeconds', 0)
+
+            # Get adaptive formats (separate video + audio)
+            adaptive = data.get('adaptiveFormats', [])
+            format_streams = data.get('formatStreams', [])
+
+            # Try combined format streams first
+            for stream in sorted(format_streams, key=lambda x: int(x.get('resolution', '0p').replace('p', '') or 0), reverse=True):
+                dl_url = stream.get('url', '')
+                if dl_url:
+                    print(f"   Downloading from {instance}...")
+                    download_file(dl_url, output_path)
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                        ensure_mp4(output_path)
+                        w, h, dur = get_video_info(output_path)
+                        print(f"   ✅ Invidious download OK!")
+                        return {
+                            'title': title,
+                            'desc': desc,
+                            'tags': data.get('keywords', []) or [],
+                            'duration': dur or duration,
+                            'width': w,
+                            'height': h,
+                            'is_short': (duration <= 60) or (h > w),
+                        }
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+
+            # Try adaptive (separate video + audio)
+            best_video_url = None
+            best_audio_url = None
+
+            for fmt in adaptive:
+                if fmt.get('type', '').startswith('video/') and fmt.get('url'):
+                    if not best_video_url:
+                        best_video_url = fmt['url']
+                elif fmt.get('type', '').startswith('audio/') and fmt.get('url'):
+                    if not best_audio_url:
+                        best_audio_url = fmt['url']
+
+            if best_video_url:
+                video_tmp = f"dl/{vid}_v.tmp"
+                audio_tmp = f"dl/{vid}_a.tmp"
+
+                download_file(best_video_url, video_tmp)
+
+                if best_audio_url:
+                    download_file(best_audio_url, audio_tmp)
+                    cmd = ['ffmpeg', '-y', '-i', video_tmp, '-i', audio_tmp,
+                           '-c:v', 'copy', '-c:a', 'aac', output_path]
+                    subprocess.run(cmd, capture_output=True)
+                else:
+                    os.rename(video_tmp, output_path)
+
+                for f in [video_tmp, audio_tmp]:
+                    if os.path.exists(f):
+                        os.remove(f)
+
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                    ensure_mp4(output_path)
+                    w, h, dur = get_video_info(output_path)
+                    print(f"   ✅ Invidious adaptive download OK!")
+                    return {
+                        'title': title,
+                        'desc': desc,
+                        'tags': data.get('keywords', []) or [],
+                        'duration': dur or duration,
+                        'width': w,
+                        'height': h,
+                        'is_short': (duration <= 60) or (h > w),
+                    }
+
+        except Exception as e:
+            print(f"   ⚠️ {instance}: {str(e)[:60]}")
+            for f in [output_path, f"dl/{vid}_v.tmp", f"dl/{vid}_a.tmp"]:
+                if os.path.exists(f):
+                    os.remove(f)
+            continue
+
+    return None
+
+
+def download_via_cobalt(vid, output_path):
+    """Download via Cobalt API."""
+    cobalt_apis = [
+        "https://api.cobalt.tools",
+    ]
+
+    for api_base in cobalt_apis:
+        try:
+            api_url = f"{api_base}/api/json"
+            payload = {
+                "url": f"https://www.youtube.com/watch?v={vid}",
+                "vCodec": "h264",
+                "vQuality": "720",
+                "aFormat": "mp3",
+                "isAudioOnly": False,
+            }
+            cobalt_headers = {
+                **HEADERS,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            }
+
+            r = requests.post(api_url, json=payload, headers=cobalt_headers, timeout=30)
+
+            if r.status_code != 200:
+                continue
+
+            data = r.json()
+            status = data.get('status', '')
+
+            if status == 'stream' or status == 'redirect':
+                dl_url = data.get('url', '')
+                if dl_url:
+                    print(f"   Downloading from Cobalt...")
+                    download_file(dl_url, output_path)
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                        ensure_mp4(output_path)
+                        w, h, dur = get_video_info(output_path)
+                        print(f"   ✅ Cobalt download OK!")
+                        return {
+                            'title': 'Untitled',
+                            'desc': '',
+                            'tags': [],
+                            'duration': dur,
+                            'width': w,
+                            'height': h,
+                            'is_short': (dur <= 60) or (h > w),
+                        }
+
+            elif status == 'picker':
+                # Multiple streams
+                picker = data.get('picker', [])
+                if picker:
+                    dl_url = picker[0].get('url', '')
+                    if dl_url:
+                        download_file(dl_url, output_path)
+                        if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                            ensure_mp4(output_path)
+                            w, h, dur = get_video_info(output_path)
+                            return {
+                                'title': 'Untitled', 'desc': '', 'tags': [],
+                                'duration': dur, 'width': w, 'height': h,
+                                'is_short': (dur <= 60) or (h > w),
+                            }
+
+        except Exception as e:
+            print(f"   ⚠️ Cobalt: {str(e)[:60]}")
+            continue
+
+    return None
+
+
+def download_via_ytdlp(url, vid, output_path):
+    """Last resort: yt-dlp direct."""
+    try:
+        opts = {
+            'format': 'best',
+            'outtmpl': f'dl/{vid}.%(ext)s',
+            'merge_output_format': 'mp4',
+            'quiet': False,
+            'ignoreerrors': False,
+            'retries': 5,
+        }
+        if os.path.exists(COOKIES_FILE):
+            opts['cookiefile'] = COOKIES_FILE
+
+        with yt_dlp.YoutubeDL(opts) as y:
+            info = y.extract_info(url, download=True)
+            if info and os.path.exists(output_path):
+                w, h, dur = get_video_info(output_path)
+                return {
+                    'title': info.get('title', 'Untitled'),
+                    'desc': info.get('description', ''),
+                    'tags': info.get('tags', []) or [],
+                    'duration': dur,
+                    'width': w,
+                    'height': h,
+                    'is_short': (dur <= 60) or (h > w),
+                }
+    except:
+        pass
+
+    return None
+
+
+# ============ HELPER FUNCTIONS ============
+def download_file(url, output_path):
+    """Download a file from URL with progress."""
+    r = requests.get(url, headers=HEADERS, stream=True, timeout=300)
+    r.raise_for_status()
+
+    total = int(r.headers.get('content-length', 0))
+    downloaded = 0
+
+    with open(output_path, 'wb') as f:
+        for chunk in r.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total > 0:
+                    pct = int(downloaded / total * 100)
+                    if pct % 25 == 0:
+                        print(f"   Download: {pct}% ({downloaded/1024/1024:.1f}MB)")
+
+
+def ensure_mp4(file_path):
+    """Convert to mp4 if needed."""
+    if not file_path.endswith('.mp4'):
+        mp4_path = file_path.rsplit('.', 1)[0] + '.mp4'
+        cmd = ['ffmpeg', '-y', '-i', file_path,
+               '-c:v', 'libx264', '-c:a', 'aac', mp4_path]
+        subprocess.run(cmd, capture_output=True)
+        if os.path.exists(mp4_path):
+            os.remove(file_path)
+            os.rename(mp4_path, file_path)
+
+
 def get_video_info(file_path):
-    """Get video dimensions and duration using ffprobe."""
+    """Get dimensions and duration via ffprobe."""
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json',
                '-show_format', '-show_streams', file_path]
@@ -415,19 +752,18 @@ def get_video_info(file_path):
         data = json.loads(r.stdout)
 
         duration = float(data.get('format', {}).get('duration', 0))
-        width = 1920
-        height = 1080
-        for stream in data.get('streams', []):
-            if stream.get('codec_type') == 'video':
-                width = int(stream.get('width', 1920))
-                height = int(stream.get('height', 1080))
+        width, height = 1920, 1080
+        for s in data.get('streams', []):
+            if s.get('codec_type') == 'video':
+                width = int(s.get('width', 1920))
+                height = int(s.get('height', 1080))
                 break
         return width, height, duration
     except:
         return 1920, 1080, 0
 
 
-# ============ DETECT TYPE ============
+# ============ MODIFY VIDEOS ============
 def detect_type(meta, original_type):
     if original_type == 'short':
         return 'short'
@@ -438,12 +774,10 @@ def detect_type(meta, original_type):
     return 'video'
 
 
-# ============ MODIFY REGULAR VIDEO ============
 def modify_regular_video(inp, out, speed):
     os.makedirs("out", exist_ok=True)
     vf = ",".join([
-        f"setpts=PTS/{speed}",
-        "hflip",
+        f"setpts=PTS/{speed}", "hflip",
         "crop=iw*0.95:ih*0.95",
         "scale=1920:1080:force_original_aspect_ratio=decrease",
         "pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
@@ -452,32 +786,23 @@ def modify_regular_video(inp, out, speed):
         "unsharp=5:5:0.8:5:5:0.4",
     ])
     af = ",".join([
-        f"atempo={speed}",
-        "asetrate=44100*1.02",
-        "aresample=44100",
-        "bass=g=3:f=110",
-        "equalizer=f=1000:width_type=h:width=200:g=-2",
+        f"atempo={speed}", "asetrate=44100*1.02", "aresample=44100",
+        "bass=g=3:f=110", "equalizer=f=1000:width_type=h:width=200:g=-2",
     ])
     cmd = ["ffmpeg", "-y", "-i", inp,
            "-filter:v", vf, "-filter:a", af,
            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-           "-c:a", "aac", "-b:a", "192k",
-           "-movflags", "+faststart", out]
-
-    print("🔧 Modifying regular video...")
+           "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        print(f"FFmpeg error: {r.stderr[-500:]}")
-        raise Exception("FFmpeg failed")
+        raise Exception(f"FFmpeg failed: {r.stderr[-300:]}")
     print("✅ Video modified")
 
 
-# ============ MODIFY SHORT ============
 def modify_short_video(inp, out, speed):
     os.makedirs("out", exist_ok=True)
     vf = ",".join([
-        f"setpts=PTS/{speed}",
-        "hflip",
+        f"setpts=PTS/{speed}", "hflip",
         "crop=iw*0.95:ih*0.95",
         "scale=1080:1920:force_original_aspect_ratio=decrease",
         "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
@@ -486,23 +811,17 @@ def modify_short_video(inp, out, speed):
         "unsharp=5:5:0.8:5:5:0.4",
     ])
     af = ",".join([
-        f"atempo={speed}",
-        "asetrate=44100*1.02",
-        "aresample=44100",
-        "bass=g=3:f=110",
-        "equalizer=f=1000:width_type=h:width=200:g=-2",
+        f"atempo={speed}", "asetrate=44100*1.02", "aresample=44100",
+        "bass=g=3:f=110", "equalizer=f=1000:width_type=h:width=200:g=-2",
     ])
     cmd = ["ffmpeg", "-y", "-i", inp,
            "-filter:v", vf, "-filter:a", af,
            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-           "-c:a", "aac", "-b:a", "192k",
-           "-t", "59", "-movflags", "+faststart", out]
-
-    print("🔧 Modifying short/reel...")
+           "-c:a", "aac", "-b:a", "192k", "-t", "59",
+           "-movflags", "+faststart", out]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        print(f"FFmpeg error: {r.stderr[-500:]}")
-        raise Exception("FFmpeg failed")
+        raise Exception(f"FFmpeg failed: {r.stderr[-300:]}")
     print("✅ Short modified")
 
 
@@ -510,8 +829,7 @@ def modify_short_video(inp, out, speed):
 def get_youtube():
     token_str = os.environ.get("YOUTUBE_TOKEN", "")
     if not token_str:
-        print("❌ YOUTUBE_TOKEN not set")
-        sys.exit(1)
+        sys.exit("❌ YOUTUBE_TOKEN not set")
     token = json.loads(token_str)
     creds = Credentials(
         token=token.get('token', ''),
@@ -525,22 +843,14 @@ def get_youtube():
 
 def upload_video(yt, path, title, desc, tags, privacy):
     body = {
-        'snippet': {
-            'title': title[:100],
-            'description': desc[:5000],
-            'tags': tags[:30],
-            'categoryId': '22',
-        },
-        'status': {
-            'privacyStatus': privacy,
-            'selfDeclaredMadeForKids': False,
-        }
+        'snippet': {'title': title[:100], 'description': desc[:5000],
+                     'tags': tags[:30], 'categoryId': '22'},
+        'status': {'privacyStatus': privacy, 'selfDeclaredMadeForKids': False}
     }
     media = MediaFileUpload(path, mimetype='video/mp4',
                             resumable=True, chunksize=10*1024*1024)
     req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
 
-    print(f"📤 Uploading: {title}")
     resp = None
     retry = 0
     while resp is None:
@@ -555,39 +865,31 @@ def upload_video(yt, path, title, desc, tags, privacy):
                 time.sleep(2 ** retry)
                 continue
             raise
-        except Exception:
+        except:
             retry += 1
             if retry > 10: raise
             time.sleep(5)
-            continue
-
-    print(f"✅ Uploaded! → https://youtu.be/{resp['id']}")
+    print(f"✅ Uploaded → https://youtu.be/{resp['id']}")
     return resp['id']
 
 
 # ============ MAIN ============
 def main():
     print("=" * 60)
-    print("🚀 YouTube Automation — VIDEOS + SHORTS/REELS")
+    print("🚀 YouTube Automation — Proxy Download Method")
     print("=" * 60)
 
     if not SOURCE_URL:
-        print("❌ SOURCE_URL not set!")
-        sys.exit(1)
+        sys.exit("❌ SOURCE_URL not set!")
 
-    # Setup auth
-    print("\n🔐 Setting up authentication...")
-    auth_method = setup_auth()
-    if not auth_method:
-        print("⚠️  Continuing without auth (may fail)...")
+    setup_cookies()
 
     history = load_history()
-    print(f"📜 Already uploaded: {len(history)} items")
+    print(f"📜 Already done: {len(history)}")
 
     all_content = get_all_content(SOURCE_URL)
     if not all_content:
-        print("❌ No content found")
-        return
+        sys.exit("❌ No content found")
 
     pending = [v for v in all_content if v['id'] not in history]
     if not pending:
@@ -597,39 +899,39 @@ def main():
     if ORDER == "oldest":
         pending.reverse()
 
-    pending_v = len([p for p in pending if p.get('type') == 'video'])
-    pending_s = len([p for p in pending if p.get('type') == 'short'])
-
-    print(f"\n📊 Total: {len(all_content)} | Done: {len(history)} | "
-          f"Remaining: {len(pending)} (📹{pending_v} + 🎬{pending_s})")
+    pv = len([p for p in pending if p.get('type') == 'video'])
+    ps = len([p for p in pending if p.get('type') == 'short'])
+    print(f"📊 Total: {len(all_content)} | Done: {len(history)} | Left: {len(pending)} (📹{pv} 🎬{ps})")
 
     batch = pending[:BATCH_SIZE]
     yt = get_youtube()
-
-    ok = 0
-    fail = 0
-    ok_v = 0
-    ok_s = 0
+    ok = fail = ok_v = ok_s = 0
 
     for i, v in enumerate(batch):
         try:
-            ct = "SHORT/REEL" if v.get('type') == 'short' else "VIDEO"
+            ct = v.get('type', 'video')
             print(f"\n{'='*60}")
-            print(f"[{i+1}/{len(batch)}] [{ct}] {v['title']}")
+            print(f"[{i+1}/{len(batch)}] [{'SHORT' if ct=='short' else 'VIDEO'}] {v['title']}")
             print(f"{'='*60}")
 
-            meta = download(v['url'], v['id'])
-            content_type = detect_type(meta, v.get('type', 'video'))
+            # Download via proxy
+            print("\n⬇️  Downloading via proxy APIs...")
+            meta = download(v['url'], v['id'], ct)
+            content_type = detect_type(meta, ct)
+            print(f"   Size: {os.path.getsize(meta['file'])/1024/1024:.1f}MB | "
+                  f"Duration: {meta['duration']:.0f}s | {meta['width']}x{meta['height']}")
 
+            # Modify video
             out_file = f"out/{v['id']}_mod.mp4"
             if content_type == 'short':
                 modify_short_video(meta['file'], out_file, SPEED)
             else:
                 modify_regular_video(meta['file'], out_file, SPEED)
 
+            # Modify metadata
             new_title = modify_title(meta['title'])
             if content_type == 'short' and '#shorts' not in new_title.lower():
-                new_title = (new_title[:91] + " #Shorts") if len(new_title) > 91 else (new_title + " #Shorts")
+                new_title = (new_title[:91] + " #Shorts")
 
             new_desc = modify_description(meta['desc'], new_title)
             if content_type == 'short' and '#shorts' not in new_desc.lower():
@@ -637,17 +939,18 @@ def main():
 
             new_tags = modify_tags(meta['tags'])
             if content_type == 'short':
-                extra = ["shorts","reels","viral shorts","ytshorts"]
-                new_tags = list(dict.fromkeys(new_tags + extra))[:30]
+                new_tags = list(dict.fromkeys(new_tags + ["shorts", "reels", "ytshorts"]))[:30]
 
-            print(f"📝 {meta['title']} → {new_title}")
+            print(f"📝 {meta['title'][:40]}... → {new_title[:40]}...")
 
+            # Upload
             upload_video(yt, out_file, new_title, new_desc, new_tags, PRIVACY)
             save_history(v['id'])
             ok += 1
             if content_type == 'short': ok_s += 1
             else: ok_v += 1
 
+            # Cleanup
             for f in [meta['file'], out_file]:
                 if os.path.exists(f): os.remove(f)
 
@@ -657,20 +960,17 @@ def main():
         except Exception as e:
             print(f"❌ ERROR: {e}")
             fail += 1
-            for ext in ['mp4','webm','mkv','part']:
+            for ext in ['mp4', 'webm', 'mkv', 'part', 'tmp']:
                 for prefix in ['dl/', 'out/']:
-                    p = f"{prefix}{v['id']}.{ext}"
-                    if os.path.exists(p): os.remove(p)
-                    p2 = f"{prefix}{v['id']}_mod.{ext}"
-                    if os.path.exists(p2): os.remove(p2)
+                    for p in [f"{prefix}{v['id']}.{ext}", f"{prefix}{v['id']}_mod.{ext}",
+                              f"{prefix}{v['id']}_v.{ext}", f"{prefix}{v['id']}_a.{ext}"]:
+                        if os.path.exists(p): os.remove(p)
 
-    # Cleanup auth files
-    for f in [COOKIES_FILE, OAUTH_FILE]:
-        if os.path.exists(f): os.remove(f)
+    if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
 
     rem = len(pending) - ok
     print(f"\n{'='*60}")
-    print(f"✅ Uploaded: {ok} (📹{ok_v} + 🎬{ok_s}) | ❌ Failed: {fail} | ⏳ Remaining: {rem}")
+    print(f"✅ {ok} (📹{ok_v} 🎬{ok_s}) | ❌ {fail} | ⏳ {rem} remaining")
     print(f"{'='*60}")
 
 
