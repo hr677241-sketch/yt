@@ -1,0 +1,77 @@
+name: YouTube Auto Pipeline
+
+on:
+  # Manual trigger with options
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: 'How many videos to upload this run'
+        required: false
+        default: '3'
+      speed:
+        description: 'Speed multiplier (1.05 = 5% faster)'
+        required: false
+        default: '1.05'
+      order:
+        description: 'Upload order: oldest or newest first'
+        required: false
+        default: 'oldest'
+        type: choice
+        options:
+          - oldest
+          - newest
+
+  # Auto runs every 8 hours
+  schedule:
+    - cron: '0 */8 * * *'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull latest history
+        run: |
+          git pull origin main || true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python packages
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pipeline
+        env:
+          SOURCE_URL: ${{ secrets.SOURCE_URL }}
+          YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '3' }}
+          SPEED: ${{ github.event.inputs.speed || '1.05' }}
+          PRIVACY: "public"
+          ORDER: ${{ github.event.inputs.order || 'oldest' }}
+          TITLE_PREFIX: ""
+          TITLE_SUFFIX: " | HD"
+        run: python main.py
+
+      - name: Save history to repo
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add history.txt
+          git diff --staged --quiet || git commit -m "✅ uploaded videos [skip ci]"
+          git push || true
