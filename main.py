@@ -3,8 +3,9 @@ import sys
 import json
 import time
 import subprocess
+import base64
 import re
-import requests
+import yt_dlp
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -14,91 +15,34 @@ from title_modifier import modify_title
 from description_modifier import modify_description, modify_tags
 
 
-# ==================== CONFIG ====================
+# ====================== CONFIG ======================
 SOURCE_URL   = os.environ.get("SOURCE_URL", "")
 SPEED        = float(os.environ.get("SPEED", "1.05"))
 BATCH_SIZE   = int(os.environ.get("BATCH_SIZE", "3"))
 PRIVACY      = os.environ.get("PRIVACY", "public")
 HISTORY_FILE = "history.txt"
 ORDER        = os.environ.get("ORDER", "oldest")
-
-# Marker we hide in description to track which source video it came from
-ORIGIN_MARKER = "〔SRCID:{vid_id}〕"
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) '
-                  'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 '
-                  'Mobile/15E148 Safari/604.1',
-}
+COOKIES_FILE = "cookies.txt"
+TOR_PROXY    = "socks5://127.0.0.1:9050"
 
 
-# ==================== YOUTUBE API ====================
-def get_youtube():
-    """Build YouTube API client for Channel B."""
-    token_str = os.environ.get("YOUTUBE_TOKEN", "")
-    if not token_str:
-        sys.exit("❌ YOUTUBE_TOKEN not set")
-    token = json.loads(token_str)
-    creds = Credentials(
-        token=token.get('token', ''),
-        refresh_token=token['refresh_token'],
-        token_uri=token.get('token_uri', 'https://oauth2.googleapis.com/token'),
-        client_id=token['client_id'],
-        client_secret=token['client_secret'],
-    )
-    return build("youtube", "v3", credentials=creds)
+# ====================== COOKIES ======================
+def setup_cookies():
+    """Load cookies from GitHub secret."""
+    b64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
+    if b64:
+        try:
+            with open(COOKIES_FILE, "wb") as f:
+                f.write(base64.b64decode(b64))
+            print("🍪 Cookies loaded")
+            return True
+        except Exception as e:
+            print(f"⚠️ Cookie decode error: {e}")
+    return False
 
 
-def get_uploaded_ids(yt):
-    """
-    Check Channel B for already uploaded videos.
-    Reads the hidden SRCID marker from descriptions.
-    This is 100% reliable — no git commit issues.
-    """
-    print("🔍 Checking Channel B for already uploaded videos...")
-    uploaded = set()
-
-    try:
-        # Get Channel B's upload playlist
-        channels = yt.channels().list(part="contentDetails", mine=True).execute()
-        if not channels.get('items'):
-            print("   ⚠️ Could not fetch Channel B info")
-            return uploaded
-
-        uploads_playlist = channels['items'][0]['contentDetails']['relatedPlaylists']['uploads']
-
-        # Fetch all videos from Channel B
-        next_page = None
-        while True:
-            request = yt.playlistItems().list(
-                part="snippet",
-                playlistId=uploads_playlist,
-                maxResults=50,
-                pageToken=next_page,
-            )
-            response = request.execute()
-
-            for item in response.get('items', []):
-                desc = item['snippet'].get('description', '')
-                # Find our hidden marker
-                match = re.search(r'〔SRCID:([a-zA-Z0-9_-]+)〕', desc)
-                if match:
-                    uploaded.add(match.group(1))
-
-            next_page = response.get('nextPageToken')
-            if not next_page:
-                break
-
-    except Exception as e:
-        print(f"   ⚠️ API check error: {e}")
-
-    print(f"   Found {len(uploaded)} already uploaded source IDs")
-    return uploaded
-
-
-# ==================== HISTORY (backup) ====================
+# ====================== HISTORY ======================
 def load_history():
-    """Local file history as backup."""
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE) as f:
             return set(l.strip() for l in f if l.strip())
@@ -110,7 +54,38 @@ def save_history(vid):
         f.write(vid + "\n")
 
 
-# ==================== CHANNEL A LISTING ====================
+# ====================== TOR HELPERS ======================
+def renew_tor():
+    """Get new Tor exit IP."""
+    try:
+        subprocess.run(["sudo", "killall", "-HUP", "tor"],
+                       capture_output=True, timeout=10)
+        time.sleep(8)
+    except:
+        try:
+            subprocess.run(["sudo", "service", "tor", "restart"],
+                           capture_output=True, timeout=30)
+            time.sleep(12)
+        except:
+            pass
+
+
+def find_deno():
+    """Find deno path for yt-dlp JS runtime."""
+    for p in [os.path.expanduser("~/.deno/bin/deno"),
+              "/home/runner/.deno/bin/deno", "/usr/local/bin/deno"]:
+        if os.path.exists(p):
+            return p
+    try:
+        r = subprocess.run(["which", "deno"], capture_output=True, text=True)
+        if r.returncode == 0:
+            return r.stdout.strip()
+    except:
+        pass
+    return None
+
+
+# ====================== CHANNEL LISTING ======================
 def get_channel_base(url):
     return re.sub(
         r'/(videos|shorts|streams|playlists|community|about|featured)/?$',
@@ -119,252 +94,216 @@ def get_channel_base(url):
 
 
 def get_all_content(url):
-    """Get all video IDs from Channel A using web scraping."""
+    """Fetch ALL videos + shorts from channel."""
     base = get_channel_base(url)
     all_items = []
     seen = set()
 
     for page_type in ["videos", "shorts"]:
+        page_url = f"{base}/{page_type}"
         vtype = "short" if page_type == "shorts" else "video"
         emoji = "🎬" if vtype == "short" else "📹"
         print(f"\n{emoji} Scanning /{page_type}...")
 
-        page_url = f"{base}/{page_type}"
-        items = _scrape_channel_page(page_url)
+        items = _fetch_listing(page_url)
+        count = 0
+        for e in items:
+            if e['id'] not in seen:
+                e['type'] = vtype
+                all_items.append(e)
+                seen.add(e['id'])
+                count += 1
+        print(f"   Found: {count}")
 
-        for vid_id, title in items:
-            if vid_id not in seen:
-                all_items.append({
-                    'id': vid_id,
-                    'url': f"https://www.youtube.com/watch?v={vid_id}",
-                    'title': title,
-                    'type': vtype,
-                })
-                seen.add(vid_id)
-
-        print(f"   Found: {len(items)}")
-
-    print(f"\n📊 Total content on Channel A: {len(all_items)}")
+    print(f"\n📊 Total content: {len(all_items)}")
     return all_items
 
 
-def _scrape_channel_page(url):
-    """Extract video IDs from channel page HTML."""
-    results = []
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        if r.status_code != 200:
-            return results
+def _fetch_listing(url):
+    """List videos from channel page (listing is rarely blocked)."""
+    opts = {'quiet': True, 'extract_flat': True, 'ignoreerrors': True}
 
-        html = r.text
+    # Try with Tor first for listing
+    for use_tor in [True, False]:
+        try:
+            if use_tor:
+                opts['proxy'] = TOR_PROXY
+            with yt_dlp.YoutubeDL(opts) as y:
+                info = y.extract_info(url, download=False)
+                if info and info.get('entries'):
+                    return [
+                        {'id': e['id'],
+                         'url': f"https://www.youtube.com/watch?v={e['id']}",
+                         'title': e.get('title', 'Untitled')}
+                        for e in info['entries'] if e and e.get('id')
+                    ]
+        except:
+            pass
 
-        # Extract video IDs and titles from the page JSON data
-        # YouTube embeds initial data as JSON in the page
-        pattern = r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"'
-        ids = re.findall(pattern, html)
-
-        # Extract titles
-        title_pattern = r'"title"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"([^"]+)"'
-        titles = re.findall(title_pattern, html)
-
-        seen = set()
-        for i, vid_id in enumerate(ids):
-            if vid_id not in seen and len(vid_id) == 11:
-                title = titles[i] if i < len(titles) else "Untitled"
-                results.append((vid_id, title))
-                seen.add(vid_id)
-
-    except Exception as e:
-        print(f"   ⚠️ Scrape error: {e}")
-
-    return results
+    return []
 
 
-# ==================== DOWNLOAD ====================
-def download(url, vid):
+# ====================== DOWNLOAD ======================
+def download(url, vid, content_type="video"):
     """
-    Download video using multiple methods.
-    Priority: pytubefix → Cobalt API → yt-dlp
+    Download video with 4 strategies in order of speed:
+    1. iOS client direct (fastest)
+    2. Android client direct
+    3. torsocks CLI (reliable)
+    4. torsocks CLI with IP rotation (most robust)
     """
     os.makedirs("dl", exist_ok=True)
     file_path = f"dl/{vid}.mp4"
-    _clean(vid)
+    _clean_files(vid)
 
-    methods = [
-        ("pytubefix", lambda: _dl_pytubefix(url, vid, file_path)),
-        ("Cobalt API", lambda: _dl_cobalt(vid, file_path)),
-        ("yt-dlp iOS", lambda: _dl_ytdlp(url, vid, file_path, "ios")),
-        ("yt-dlp Android", lambda: _dl_ytdlp(url, vid, file_path, "android")),
+    # Build strategies
+    strategies = [
+        ("iOS direct",    _download_ios,     {}),
+        ("Android direct",_download_android, {}),
+        ("Tor CLI",       _download_tor_cli, {"retries": 1}),
+        ("Tor CLI retry", _download_tor_cli, {"retries": 8}),
     ]
 
-    for name, func in methods:
+    for name, func, kwargs in strategies:
         try:
             print(f"   🔄 {name}...")
-            meta = func()
+            meta = func(url, vid, file_path, **kwargs)
             if meta and os.path.exists(file_path) and os.path.getsize(file_path) > 10000:
-                w, h, dur = _probe(file_path)
+                w, h, dur = _get_info(file_path)
                 meta.update({
                     'file': file_path, 'width': w, 'height': h,
                     'duration': dur,
-                    'is_short': dur <= 60 or h > w,
+                    'is_short': content_type == 'short' or dur <= 60 or h > w,
                 })
-                size_mb = os.path.getsize(file_path) / 1024 / 1024
-                print(f"   ✅ {name} OK! {size_mb:.1f}MB | {w}x{h} | {dur:.0f}s")
+                size = os.path.getsize(file_path) / 1024 / 1024
+                print(f"   ✅ OK! {size:.1f}MB | {w}x{h} | {dur:.0f}s")
                 return meta
         except Exception as e:
-            print(f"   ❌ {name}: {str(e)[:80]}")
-            _clean(vid)
-    
+            msg = str(e)[:80]
+            print(f"   ❌ {name}: {msg}")
+            _clean_files(vid)
+            continue
+
     raise Exception(f"All download methods failed for {vid}")
 
 
-def _dl_pytubefix(url, vid, output):
-    """Download using pytubefix library."""
-    from pytubefix import YouTube
-    from pytubefix.cli import on_progress
-
-    yt = YouTube(url, on_progress_callback=on_progress)
-
-    # Try progressive streams first (video + audio combined)
-    stream = yt.streams.filter(
-        progressive=True, file_extension='mp4'
-    ).order_by('resolution').desc().first()
-
-    if not stream:
-        # Try adaptive (video only, need to merge audio)
-        video_stream = yt.streams.filter(
-            adaptive=True, file_extension='mp4', only_video=True
-        ).order_by('resolution').desc().first()
-
-        audio_stream = yt.streams.filter(
-            adaptive=True, only_audio=True
-        ).order_by('abr').desc().first()
-
-        if video_stream and audio_stream:
-            v_path = video_stream.download(output_path="dl", filename=f"{vid}_v")
-            a_path = audio_stream.download(output_path="dl", filename=f"{vid}_a")
-
-            # Merge with ffmpeg
-            cmd = ['ffmpeg', '-y', '-i', v_path, '-i', a_path,
-                   '-c:v', 'copy', '-c:a', 'aac', output]
-            subprocess.run(cmd, capture_output=True, check=True)
-
-            for f in [v_path, a_path]:
-                if os.path.exists(f):
-                    os.remove(f)
-        elif video_stream:
-            video_stream.download(output_path="dl", filename=f"{vid}.mp4")
-        else:
-            raise Exception("No streams available")
-    else:
-        stream.download(output_path="dl", filename=f"{vid}.mp4")
-
-    # Handle if pytubefix saved with different name
-    if not os.path.exists(output):
-        for f in os.listdir("dl"):
-            if f.startswith(vid) and not f.endswith('.part'):
-                full = os.path.join("dl", f)
-                if full != output:
-                    if not f.endswith('.mp4'):
-                        _to_mp4(full, output)
-                    else:
-                        os.rename(full, output)
-                break
-
-    if not os.path.exists(output):
-        raise Exception("File not found after download")
-
-    return {
-        'id': vid,
-        'title': yt.title or 'Untitled',
-        'desc': yt.description or '',
-        'tags': yt.keywords or [],
-    }
-
-
-def _dl_cobalt(vid, output):
-    """Download using Cobalt API."""
-    api_url = "https://api.cobalt.tools"
-
-    payload = {
-        "url": f"https://www.youtube.com/watch?v={vid}",
-        "downloadMode": "auto",
-        "filenameStyle": "basic",
-    }
-
-    cobalt_headers = {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'User-Agent': HEADERS['User-Agent'],
-    }
-
-    r = requests.post(f"{api_url}/", json=payload,
-                      headers=cobalt_headers, timeout=30)
-
-    if r.status_code != 200:
-        raise Exception(f"Cobalt API returned {r.status_code}")
-
-    data = r.json()
-    status = data.get('status', '')
-
-    dl_url = None
-    if status in ('tunnel', 'redirect', 'stream'):
-        dl_url = data.get('url', '')
-    elif status == 'picker':
-        picker = data.get('picker', [])
-        if picker:
-            dl_url = picker[0].get('url', '')
-
-    if not dl_url:
-        raise Exception(f"Cobalt no URL. Status: {status}")
-
-    # Download the file
-    r = requests.get(dl_url, headers=HEADERS, stream=True, timeout=300)
-    r.raise_for_status()
-
-    with open(output, 'wb') as f:
-        for chunk in r.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                f.write(chunk)
-
-    if not output.endswith('.mp4') or _needs_convert(output):
-        tmp = output + ".tmp"
-        os.rename(output, tmp)
-        _to_mp4(tmp, output)
-
-    return {
-        'id': vid, 'title': 'Untitled', 'desc': '', 'tags': [],
-    }
-
-
-def _dl_ytdlp(url, vid, output, client):
-    """Download using yt-dlp as fallback."""
-    import yt_dlp
-
+def _base_opts(vid):
+    """Common yt-dlp options."""
     opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': f'dl/{vid}.%(ext)s',
         'merge_output_format': 'mp4',
-        'quiet': True,
+        'quiet': False,
         'ignoreerrors': False,
         'retries': 3,
         'socket_timeout': 30,
-        'extractor_args': {
-            'youtube': {
-                'player_client': [client],
-                'player_skip': ['webpage', 'configs'],
-            }
-        },
-        'http_headers': HEADERS,
     }
+    if os.path.exists(COOKIES_FILE):
+        opts['cookiefile'] = COOKIES_FILE
+    return opts
 
+
+def _download_ios(url, vid, output):
+    """Strategy 1: iOS client impersonation."""
+    opts = _base_opts(vid)
+    opts['extractor_args'] = {
+        'youtube': {
+            'player_client': ['ios'],
+            'player_skip': ['webpage', 'configs'],
+        }
+    }
+    opts['http_headers'] = {
+        'User-Agent': 'com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)',
+    }
+    return _run_ytdlp(url, vid, output, opts)
+
+
+def _download_android(url, vid, output):
+    """Strategy 2: Android client impersonation."""
+    opts = _base_opts(vid)
+    opts['extractor_args'] = {
+        'youtube': {
+            'player_client': ['android'],
+            'player_skip': ['webpage', 'configs'],
+        }
+    }
+    opts['http_headers'] = {
+        'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 14; en_US) gzip',
+    }
+    return _run_ytdlp(url, vid, output, opts)
+
+
+def _download_tor_cli(url, vid, output, retries=1):
+    """Strategy 3/4: Download via torsocks command line."""
+    deno = find_deno()
+
+    for attempt in range(1, retries + 1):
+        _clean_files(vid)
+
+        if retries > 1:
+            print(f"      Tor attempt {attempt}/{retries}")
+
+        cmd = [
+            "torsocks", "yt-dlp",
+            "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "--output", f"dl/{vid}.%(ext)s",
+            "--merge-output-format", "mp4",
+            "--retries", "3",
+            "--socket-timeout", "30",
+            "--no-check-certificates",
+        ]
+
+        if deno:
+            cmd.extend(["--js-runtimes", f"deno:{deno}"])
+
+        if os.path.exists(COOKIES_FILE):
+            cmd.extend(["--cookies", COOKIES_FILE])
+
+        cmd.append(url)
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+
+            # Find downloaded file
+            found = _find_file(vid)
+            if found:
+                if found != output:
+                    if not found.endswith('.mp4'):
+                        _to_mp4(found, output)
+                    else:
+                        os.rename(found, output)
+
+                if os.path.exists(output) and os.path.getsize(output) > 10000:
+                    return {
+                        'id': vid,
+                        'title': _extract_title(result.stdout, vid),
+                        'desc': '', 'tags': [],
+                    }
+
+            # Bot blocked — rotate IP
+            if "Sign in" in result.stderr or "bot" in result.stderr.lower():
+                if attempt < retries:
+                    renew_tor()
+                continue
+
+        except subprocess.TimeoutExpired:
+            if attempt < retries:
+                renew_tor()
+            continue
+
+    raise Exception("Tor CLI failed")
+
+
+def _run_ytdlp(url, vid, output, opts):
+    """Execute yt-dlp Python download."""
     with yt_dlp.YoutubeDL(opts) as y:
         info = y.extract_info(url, download=True)
 
     if not info:
-        raise Exception("No info")
+        raise Exception("No info returned")
 
-    found = _find(vid)
+    # Find the file
+    found = _find_file(vid)
     if found and found != output:
         if not found.endswith('.mp4'):
             _to_mp4(found, output)
@@ -372,7 +311,7 @@ def _dl_ytdlp(url, vid, output, client):
             os.rename(found, output)
 
     if not os.path.exists(output) or os.path.getsize(output) < 10000:
-        raise Exception("File missing")
+        raise Exception("File missing or too small")
 
     return {
         'id': vid,
@@ -382,23 +321,22 @@ def _dl_ytdlp(url, vid, output, client):
     }
 
 
-# ==================== HELPERS ====================
-def _find(vid):
-    for ext in ['mp4', 'webm', 'mkv', 'flv', 'avi', '3gp']:
+# ====================== HELPERS ======================
+def _find_file(vid):
+    for ext in ['mp4', 'webm', 'mkv', 'flv', 'avi']:
         p = f'dl/{vid}.{ext}'
         if os.path.exists(p) and os.path.getsize(p) > 1000:
             return p
     return None
 
 
-def _clean(vid):
-    for ext in ['mp4', 'webm', 'mkv', 'part', 'flv', 'avi',
-                'f251.webm', 'f140.m4a', 'tmp']:
+def _clean_files(vid):
+    for ext in ['mp4', 'webm', 'mkv', 'part', 'f251.webm', 'f140.m4a',
+                'flv', 'avi', '_v.tmp', '_a.tmp']:
         p = f'dl/{vid}.{ext}'
         if os.path.exists(p):
             os.remove(p)
-    for suffix in ['_v', '_a', '_v.mp4', '_a.mp4',
-                    '_v.webm', '_a.webm', '_v.m4a', '_a.m4a']:
+    for suffix in ['_v.tmp', '_a.tmp']:
         p = f'dl/{vid}{suffix}'
         if os.path.exists(p):
             os.remove(p)
@@ -408,24 +346,11 @@ def _to_mp4(inp, out):
     subprocess.run(['ffmpeg', '-y', '-i', inp,
                     '-c:v', 'libx264', '-c:a', 'aac', out],
                    capture_output=True)
-    if os.path.exists(out) and os.path.exists(inp) and inp != out:
+    if os.path.exists(out) and os.path.exists(inp):
         os.remove(inp)
 
 
-def _needs_convert(path):
-    """Check if file needs conversion."""
-    try:
-        r = subprocess.run(['ffprobe', '-v', 'quiet', '-print_format', 'json',
-                           '-show_format', path],
-                          capture_output=True, text=True)
-        data = json.loads(r.stdout)
-        fmt = data.get('format', {}).get('format_name', '')
-        return 'mp4' not in fmt
-    except:
-        return False
-
-
-def _probe(path):
+def _get_info(path):
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json',
                '-show_format', '-show_streams', path]
@@ -443,7 +368,22 @@ def _probe(path):
         return 1920, 1080, 0
 
 
-# ==================== VIDEO MODIFICATION ====================
+def _extract_title(stdout, vid):
+    if not stdout:
+        return "Untitled"
+    for line in stdout.split('\n'):
+        if 'Destination:' in line:
+            parts = line.split('Destination:')
+            if len(parts) > 1:
+                name = parts[1].strip()
+                name = re.sub(r'\.[a-z0-9]+$', '', name)
+                name = name.replace(vid, '').strip(' ._-')
+                if name:
+                    return name
+    return "Untitled"
+
+
+# ====================== VIDEO MODIFICATION ======================
 def detect_type(meta, original_type):
     if original_type == 'short':
         return 'short'
@@ -466,44 +406,61 @@ def modify_video(inp, out, speed, is_short=False):
         pad = "pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
 
     vf = ",".join([
-        f"setpts=PTS/{speed}",
-        "hflip",
-        "crop=iw*0.95:ih*0.95",
-        scale, pad,
-        "eq=brightness=0.04:contrast=1.06:saturation=1.08",
-        "colorbalance=rs=0.03:gs=-0.02:bs=0.04",
-        "unsharp=5:5:0.8:5:5:0.4",
+        f"setpts=PTS/{speed}",          # Speed up
+        "hflip",                         # Mirror
+        "crop=iw*0.95:ih*0.95",          # Crop 5%
+        scale, pad,                      # Resize
+        "eq=brightness=0.04:contrast=1.06:saturation=1.08",  # Color shift
+        "colorbalance=rs=0.03:gs=-0.02:bs=0.04",             # Color tint
+        "unsharp=5:5:0.8:5:5:0.4",      # Sharpen
     ])
 
     af = ",".join([
-        f"atempo={speed}",
-        "asetrate=44100*1.02",
-        "aresample=44100",
-        "bass=g=3:f=110",
-        "equalizer=f=1000:width_type=h:width=200:g=-2",
+        f"atempo={speed}",              # Speed up audio
+        "asetrate=44100*1.02",           # Pitch shift 2%
+        "aresample=44100",               # Resample
+        "bass=g=3:f=110",               # Bass boost
+        "equalizer=f=1000:width_type=h:width=200:g=-2",  # EQ change
     ])
 
     cmd = [
         "ffmpeg", "-y", "-i", inp,
-        "-filter:v", vf, "-filter:a", af,
+        "-filter:v", vf,
+        "-filter:a", af,
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
     ]
 
     if is_short:
-        cmd.extend(["-t", "59"])
+        cmd.extend(["-t", "59"])         # Max 59s for shorts
 
     cmd.append(out)
 
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        raise Exception(f"FFmpeg: {r.stderr[-200:]}")
+        raise Exception(f"FFmpeg failed: {r.stderr[-200:]}")
 
     print(f"   ✅ {'Short' if is_short else 'Video'} modified")
 
 
-# ==================== UPLOAD ====================
+# ====================== UPLOAD ======================
+def get_youtube():
+    token_str = os.environ.get("YOUTUBE_TOKEN", "")
+    if not token_str:
+        sys.exit("❌ YOUTUBE_TOKEN not set")
+
+    token = json.loads(token_str)
+    creds = Credentials(
+        token=token.get('token', ''),
+        refresh_token=token['refresh_token'],
+        token_uri=token.get('token_uri', 'https://oauth2.googleapis.com/token'),
+        client_id=token['client_id'],
+        client_secret=token['client_secret'],
+    )
+    return build("youtube", "v3", credentials=creds)
+
+
 def upload_video(yt, path, title, desc, tags, privacy):
     body = {
         'snippet': {
@@ -550,46 +507,29 @@ def upload_video(yt, path, title, desc, tags, privacy):
     return vid_id
 
 
-# ==================== MAIN ====================
+# ====================== MAIN ======================
 def main():
     print("=" * 60)
     print("🚀 YouTube Auto Pipeline — Final Version")
-    print("   pytubefix + Cobalt + YouTube API duplicate check")
     print("=" * 60)
 
     if not SOURCE_URL:
         sys.exit("❌ SOURCE_URL not set!")
 
-    # Connect to YouTube API
-    yt = get_youtube()
+    # Setup
+    has_cookies = setup_cookies()
+    history = load_history()
+    print(f"📜 Already uploaded: {len(history)}")
 
-    # === DUPLICATE CHECK ===
-    # Method 1: Check Channel B via API (100% reliable)
-    api_done = get_uploaded_ids(yt)
-
-    # Method 2: Local history file (backup)
-    file_done = load_history()
-
-    # Combine both
-    already_done = api_done | file_done
-    print(f"📜 Total already done: {len(already_done)}")
-    print(f"   (API: {len(api_done)} | File: {len(file_done)})")
-
-    # Sync: add API results to local file
-    for vid_id in api_done:
-        if vid_id not in file_done:
-            save_history(vid_id)
-
-    # === GET CHANNEL A CONTENT ===
+    # Get all content
     all_content = get_all_content(SOURCE_URL)
     if not all_content:
-        sys.exit("❌ No content found on Channel A")
+        sys.exit("❌ No content found on channel")
 
     # Filter pending
-    pending = [v for v in all_content if v['id'] not in already_done]
-
+    pending = [v for v in all_content if v['id'] not in history]
     if not pending:
-        print("\n🎉 ALL content already uploaded! Nothing to do.")
+        print("🎉 ALL content already uploaded!")
         return
 
     if ORDER == "oldest":
@@ -598,13 +538,13 @@ def main():
     pv = len([p for p in pending if p.get('type') == 'video'])
     ps = len([p for p in pending if p.get('type') == 'short'])
 
-    print(f"\n📊 Channel A: {len(all_content)} total")
-    print(f"   ✅ Already done: {len(already_done)}")
-    print(f"   ⏳ Remaining: {len(pending)} (📹{pv} 🎬{ps})")
-    print(f"   📦 This batch: {min(BATCH_SIZE, len(pending))}")
+    print(f"\n📊 Channel: {len(all_content)} total | {len(history)} done | "
+          f"{len(pending)} left (📹{pv} 🎬{ps})")
+    print(f"📦 This batch: {min(BATCH_SIZE, len(pending))}")
 
-    # === PROCESS BATCH ===
+    # Process batch
     batch = pending[:BATCH_SIZE]
+    yt = get_youtube()
     ok = fail = ok_v = ok_s = 0
 
     for i, v in enumerate(batch):
@@ -616,24 +556,19 @@ def main():
         print(f"   ID: {v['id']} | Type: {ct.upper()}")
         print(f"{'=' * 60}")
 
-        # Double-check not already done
-        if v['id'] in already_done:
-            print("   ⏩ Already uploaded — skipping")
-            continue
-
         try:
-            # DOWNLOAD
+            # ── DOWNLOAD ──
             print("\n⬇️  Downloading...")
-            meta = download(v['url'], v['id'])
+            meta = download(v['url'], v['id'], ct)
             content_type = detect_type(meta, ct)
-            is_short = content_type == 'short'
 
-            # MODIFY VIDEO
-            print("\n⚡ Modifying...")
+            # ── MODIFY VIDEO ──
+            print("\n⚡ Modifying video...")
             out_file = f"out/{v['id']}_mod.mp4"
+            is_short = content_type == 'short'
             modify_video(meta['file'], out_file, SPEED, is_short)
 
-            # MODIFY TITLE
+            # ── MODIFY TITLE ──
             original_title = meta.get('title') or v.get('title') or 'Untitled'
             new_title = modify_title(original_title)
             if is_short and '#shorts' not in new_title.lower():
@@ -646,55 +581,54 @@ def main():
             print(f"   OLD: {original_title[:50]}")
             print(f"   NEW: {new_title[:50]}")
 
-            # MODIFY DESCRIPTION
+            # ── MODIFY DESCRIPTION ──
             new_desc = modify_description(meta.get('desc', ''), new_title)
             if is_short and '#shorts' not in new_desc.lower():
                 new_desc = "#Shorts\n\n" + new_desc
 
-            # Add hidden source ID marker (for duplicate detection)
-            marker = ORIGIN_MARKER.format(vid_id=v['id'])
-            new_desc = new_desc + f"\n\n{marker}"
-
-            # MODIFY TAGS
+            # ── MODIFY TAGS ──
             new_tags = modify_tags(meta.get('tags', []))
             if is_short:
                 new_tags = list(dict.fromkeys(
                     new_tags + ["shorts", "reels", "ytshorts", "short video"]
                 ))[:30]
 
-            # UPLOAD
+            # ── UPLOAD ──
             print("\n📤 Uploading...")
             upload_video(yt, out_file, new_title, new_desc, new_tags, PRIVACY)
 
-            # SAVE TO HISTORY + MARK DONE
+            # ── SAVE & CLEANUP ──
             save_history(v['id'])
-            already_done.add(v['id'])
             ok += 1
             if is_short:
                 ok_s += 1
             else:
                 ok_v += 1
 
-            # CLEANUP
             for f in [meta['file'], out_file]:
                 if os.path.exists(f):
                     os.remove(f)
 
-            # WAIT
+            # Wait between videos
             if i < len(batch) - 1:
-                print(f"\n⏳ Waiting 10s...")
-                time.sleep(10)
+                wait = 10
+                print(f"\n⏳ Waiting {wait}s...")
+                time.sleep(wait)
 
         except Exception as e:
             print(f"\n❌ FAILED: {e}")
             fail += 1
-            _clean(v['id'])
+            _clean_files(v['id'])
             out = f"out/{v['id']}_mod.mp4"
             if os.path.exists(out):
                 os.remove(out)
             continue
 
-    # SUMMARY
+    # Cleanup
+    if os.path.exists(COOKIES_FILE):
+        os.remove(COOKIES_FILE)
+
+    # Summary
     remaining = len(pending) - ok
     print(f"\n{'=' * 60}")
     print(f"📊 RESULTS")
@@ -702,15 +636,13 @@ def main():
     print(f"   ✅ Uploaded:  {ok} (📹{ok_v} + 🎬{ok_s})")
     print(f"   ❌ Failed:    {fail}")
     print(f"   ⏳ Remaining: {remaining}")
-
     if remaining > 0 and ok > 0:
-        runs = remaining // BATCH_SIZE + 1
-        print(f"   🕐 ~{runs} more auto-runs needed")
+        runs_left = remaining // BATCH_SIZE + 1
+        print(f"   🕐 ~{runs_left} more runs needed")
     elif ok == 0 and fail > 0:
-        print(f"   ⚠️ All failed — check logs above")
+        print(f"   ⚠️  All failed — re-export cookies and try again")
     elif remaining == 0:
         print(f"   🎉 ALL DONE!")
-
     print(f"{'=' * 60}")
 
 
