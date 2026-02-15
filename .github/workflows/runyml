@@ -1,26 +1,17 @@
-name: YouTube Auto Pipeline
+name: YouTube Random Auto Pipeline
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual trigger for testing
     inputs:
-      batch_size:
-        description: 'Videos per run'
+      force_batch:
+        description: 'Force specific batch size (leave empty for random)'
         required: false
-        default: '3'
-      speed:
-        description: 'Speed (1.05 = 5% faster)'
-        required: false
-        default: '1.05'
-      order:
-        description: 'Upload order (oldest/newest)'
-        required: false
-        default: 'oldest'
-
   schedule:
-    - cron: '0 */6 * * *'  # Runs every 6 hours (4 times a day)
+    # Runs every 2 hours (00:00, 02:00, 04:00... UTC)
+    - cron: '0 */2 * * *'
 
 permissions:
-  contents: write  # Critical for saving history.txt
+  contents: write # Needed to save history.txt
 
 jobs:
   run:
@@ -28,27 +19,61 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      # 1. Random Delay (Makes the upload time random)
+      - name: Randomize Start Time
+        if: github.event_name == 'schedule'
+        run: |
+          # Generate random number between 60 and 3000 seconds (1 to 50 minutes)
+          DELAY=$(( $RANDOM % 3000 + 60 ))
+          echo "⏳ Sleeping for $(($DELAY / 60)) minutes to randomize upload time..."
+          sleep $DELAY
+
+      # 2. Calculate Random Batch Size
+      - name: Determine Batch Size
+        id: randomizer
+        run: |
+          # If manually triggered with input, use that
+          if [[ "${{ inputs.force_batch }}" != "" ]]; then
+            echo "BATCH_SIZE=${{ inputs.force_batch }}" >> $GITHUB_ENV
+            echo "✅ Manual override: ${{ inputs.force_batch }}"
+          else
+            # Generate random number: 0, 1, or 2
+            # 0 = Skip this run (natural break)
+            # 1 = Upload 1 video
+            # 2 = Upload 2 videos
+            RAND_NUM=$(( $RANDOM % 3 ))
+            echo "BATCH_SIZE=$RAND_NUM" >> $GITHUB_ENV
+            echo "🎲 Randomly selected batch size: $RAND_NUM"
+          fi
+
       - name: Checkout Code
+        if: env.BATCH_SIZE != '0' # Only run if batch size > 0
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0 
 
       - name: Setup Python
+        if: env.BATCH_SIZE != '0'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install System Tools
+      - name: Install Dependencies
+        if: env.BATCH_SIZE != '0'
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg tor torsocks
           
-          # Install Deno (for yt-dlp JS execution)
+          # Install Deno
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
 
-          # Configure Tor
+          # Python Libs
+          python -m pip install --upgrade pip
+          pip install yt-dlp google-api-python-client google-auth-oauthlib google-auth-httplib2
+
+          # Config Tor
           sudo bash -c 'cat >> /etc/tor/torrc << EOF
           ExitNodes {us},{gb},{de},{fr},{nl},{se},{ca},{au},{jp},{in}
           StrictNodes 0
@@ -57,35 +82,29 @@ jobs:
           sudo service tor start
           sleep 10
 
-      - name: Install Python Libs
-        run: |
-          python -m pip install --upgrade pip
-          pip install yt-dlp google-auth google-auth-oauthlib google-api-python-client
-          # If you use a requirements.txt, uncomment next line:
-          # pip install -r requirements.txt
-
       - name: Run Pipeline
+        if: env.BATCH_SIZE != '0'
         env:
           SOURCE_URL: ${{ secrets.SOURCE_URL }}
           YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
           YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-          BATCH_SIZE: ${{ inputs.batch_size || '3' }}
-          SPEED: ${{ inputs.speed || '1.05' }}
+          BATCH_SIZE: ${{ env.BATCH_SIZE }} 
+          SPEED: "1.05"
           PRIVACY: "public"
-          ORDER: ${{ inputs.order || 'oldest' }}
+          ORDER: "oldest"
         run: python main.py
 
-      - name: Save History (Prevent Duplicates)
+      - name: Cleanup
         if: always()
+        run: |
+          rm -f cookies.txt
+          rm -rf dl/ out/
+
+      - name: Save History
+        if: env.BATCH_SIZE != '0' # Only save if we actually ran
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          
-          # Pull changes first to avoid conflicts
           git pull origin main --rebase || git pull origin main
-          
-          # Add history file
           git add history.txt
-          
-          # Commit and Push only if changed
           git diff --staged --quiet || (git commit -m "📝 Update history [skip ci]" && git push)
