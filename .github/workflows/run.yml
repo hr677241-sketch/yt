@@ -42,53 +42,26 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install everything
+      - name: Install packages
         run: |
-          # System packages
           sudo apt-get update
-          sudo apt-get install -y ffmpeg tor torsocks nodejs npm
-
-          # Deno (JS runtime for yt-dlp)
-          curl -fsSL https://deno.land/install.sh | sh
-          echo "$HOME/.deno/bin" >> $GITHUB_PATH
-
-          # Configure Tor as backup
-          sudo bash -c 'cat >> /etc/tor/torrc << EOF
-          ExitNodes {us},{gb},{de},{fr},{nl},{se},{ca},{au},{jp},{in}
-          StrictNodes 0
-          NewCircuitPeriod 15
-          EOF'
-          sudo service tor start
-          sleep 8
-
-          # Python packages
-          pip install --upgrade pip yt-dlp
+          sudo apt-get install -y ffmpeg
+          pip install --upgrade pip
           pip install -r requirements.txt
-
-          # Verify
-          echo "yt-dlp: $(yt-dlp --version)"
-          echo -n "GitHub IP: "; curl -s https://httpbin.org/ip | grep origin || true
-          echo -n "Tor IP: "; curl -s --socks5-hostname 127.0.0.1:9050 https://httpbin.org/ip | grep origin || echo "Tor starting..."
 
       - name: Run pipeline
         env:
           SOURCE_URL: ${{ secrets.SOURCE_URL }}
           YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
-          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '3' }}
           SPEED: ${{ github.event.inputs.speed || '1.05' }}
           PRIVACY: "public"
           ORDER: ${{ github.event.inputs.order || 'oldest' }}
-          DENO_DIR: ${{ github.workspace }}/.deno_cache
-          PATH: /home/runner/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         run: python main.py
 
       - name: Cleanup
         if: always()
-        run: |
-          rm -f cookies.txt
-          rm -rf dl/ out/
-          sudo service tor stop || true
+        run: rm -rf dl/ out/
 
       - name: Save history
         if: always()
