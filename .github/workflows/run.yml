@@ -12,16 +12,15 @@ on:
         required: false
         default: '1.05'
       order:
-        description: 'Upload order'
+        description: 'Upload order (oldest/newest)'
         required: false
         default: 'oldest'
-        type: choice
-        options:
-          - oldest
-          - newest
 
   schedule:
-    - cron: '0 */8 * * *'
+    - cron: '0 */6 * * *'  # Runs every 6 hours (4 times a day)
+
+permissions:
+  contents: write  # Critical for saving history.txt
 
 jobs:
   run:
@@ -29,72 +28,64 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pull latest
-        run: git pull origin main || true
+          fetch-depth: 0 
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install everything
+      - name: Install System Tools
         run: |
-          # System packages
           sudo apt-get update
-          sudo apt-get install -y ffmpeg tor torsocks nodejs npm
-
-          # Deno (JS runtime for yt-dlp)
+          sudo apt-get install -y ffmpeg tor torsocks
+          
+          # Install Deno (for yt-dlp JS execution)
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
 
-          # Configure Tor as backup
+          # Configure Tor
           sudo bash -c 'cat >> /etc/tor/torrc << EOF
           ExitNodes {us},{gb},{de},{fr},{nl},{se},{ca},{au},{jp},{in}
           StrictNodes 0
-          NewCircuitPeriod 15
+          MaxCircuitDirtiness 60
           EOF'
           sudo service tor start
-          sleep 8
+          sleep 10
 
-          # Python packages
-          pip install --upgrade pip yt-dlp
-          pip install -r requirements.txt
+      - name: Install Python Libs
+        run: |
+          python -m pip install --upgrade pip
+          pip install yt-dlp google-auth google-auth-oauthlib google-api-python-client
+          # If you use a requirements.txt, uncomment next line:
+          # pip install -r requirements.txt
 
-          # Verify
-          echo "yt-dlp: $(yt-dlp --version)"
-          echo -n "GitHub IP: "; curl -s https://httpbin.org/ip | grep origin || true
-          echo -n "Tor IP: "; curl -s --socks5-hostname 127.0.0.1:9050 https://httpbin.org/ip | grep origin || echo "Tor starting..."
-
-      - name: Run pipeline
+      - name: Run Pipeline
         env:
           SOURCE_URL: ${{ secrets.SOURCE_URL }}
           YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
           YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-          BATCH_SIZE: ${{ github.event.inputs.batch_size || '3' }}
-          SPEED: ${{ github.event.inputs.speed || '1.05' }}
+          BATCH_SIZE: ${{ inputs.batch_size || '3' }}
+          SPEED: ${{ inputs.speed || '1.05' }}
           PRIVACY: "public"
-          ORDER: ${{ github.event.inputs.order || 'oldest' }}
-          DENO_DIR: ${{ github.workspace }}/.deno_cache
-          PATH: /home/runner/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          ORDER: ${{ inputs.order || 'oldest' }}
         run: python main.py
 
-      - name: Cleanup
+      - name: Save History (Prevent Duplicates)
         if: always()
         run: |
-          rm -f cookies.txt
-          rm -rf dl/ out/
-          sudo service tor stop || true
-
-      - name: Save history
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # Pull changes first to avoid conflicts
+          git pull origin main --rebase || git pull origin main
+          
+          # Add history file
           git add history.txt
-          git diff --staged --quiet || git commit -m "uploaded [skip ci]"
-          git push || true
+          
+          # Commit and Push only if changed
+          git diff --staged --quiet || (git commit -m "📝 Update history [skip ci]" && git push)
