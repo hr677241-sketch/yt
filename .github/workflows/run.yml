@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       batch_size:
-        description: 'How many items per run'
+        description: 'Videos per run'
         required: false
         default: '3'
       speed:
@@ -26,7 +26,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # Should be fast now
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -42,35 +42,53 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install System Packages
+      - name: Install everything
         run: |
+          # System packages
           sudo apt-get update
-          sudo apt-get install -y ffmpeg nodejs npm
+          sudo apt-get install -y ffmpeg tor torsocks nodejs npm
 
-      - name: Install Python Packages & Plugins
-        run: |
-          pip install --upgrade pip
-          pip install --upgrade yt-dlp
+          # Deno (JS runtime for yt-dlp)
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+
+          # Configure Tor as backup
+          sudo bash -c 'cat >> /etc/tor/torrc << EOF
+          ExitNodes {us},{gb},{de},{fr},{nl},{se},{ca},{au},{jp},{in}
+          StrictNodes 0
+          NewCircuitPeriod 15
+          EOF'
+          sudo service tor start
+          sleep 8
+
+          # Python packages
+          pip install --upgrade pip yt-dlp
           pip install -r requirements.txt
-          
-          # Install the PO Token Plugin provider
-          npm install -g yt-dlp-get-pot
+
+          # Verify
+          echo "yt-dlp: $(yt-dlp --version)"
+          echo -n "GitHub IP: "; curl -s https://httpbin.org/ip | grep origin || true
+          echo -n "Tor IP: "; curl -s --socks5-hostname 127.0.0.1:9050 https://httpbin.org/ip | grep origin || echo "Tor starting..."
 
       - name: Run pipeline
         env:
           SOURCE_URL: ${{ secrets.SOURCE_URL }}
           YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
           YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '3' }}
           SPEED: ${{ github.event.inputs.speed || '1.05' }}
           PRIVACY: "public"
           ORDER: ${{ github.event.inputs.order || 'oldest' }}
+          DENO_DIR: ${{ github.workspace }}/.deno_cache
+          PATH: /home/runner/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         run: python main.py
 
       - name: Cleanup
         if: always()
-        run: rm -f cookies.txt
+        run: |
+          rm -f cookies.txt
+          rm -rf dl/ out/
+          sudo service tor stop || true
 
       - name: Save history
         if: always()
