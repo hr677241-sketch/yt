@@ -26,7 +26,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 60  # Should be fast now
 
     steps:
       - name: Checkout
@@ -42,78 +42,19 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install ALL system packages
+      - name: Install System Packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg tor torsocks curl nodejs npm
+          sudo apt-get install -y ffmpeg nodejs npm
 
-          # Install deno properly
-          curl -fsSL https://deno.land/install.sh | sh
-          export DENO_INSTALL="$HOME/.deno"
-          echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
-          export PATH="$DENO_INSTALL/bin:$PATH"
-
-          # Verify deno
-          if command -v deno &> /dev/null || [ -f "$HOME/.deno/bin/deno" ]; then
-            echo "✅ Deno installed: $($HOME/.deno/bin/deno --version | head -1)"
-          else
-            echo "⚠️ Deno install failed, using Node.js as fallback"
-          fi
-
-          # Configure Tor with multiple exit countries
-          sudo bash -c 'cat >> /etc/tor/torrc << EOF
-          ExitNodes {us},{gb},{de},{fr},{nl},{se},{ca},{au},{jp},{kr},{in},{br},{it},{es},{ch}
-          StrictNodes 0
-          NewCircuitPeriod 15
-          CircuitBuildTimeout 10
-          NumEntryGuards 8
-          EOF'
-
-          # Start Tor
-          sudo service tor start
-          sleep 10
-
-          # Test Tor
-          echo "Testing Tor connection..."
-          for i in 1 2 3; do
-            if curl -s --socks5-hostname 127.0.0.1:9050 --connect-timeout 15 https://httpbin.org/ip; then
-              echo ""
-              echo "✅ Tor working on attempt $i"
-              break
-            else
-              echo "Retry $i..."
-              sudo service tor restart
-              sleep 10
-            fi
-          done
-
-      - name: Install Python packages
+      - name: Install Python Packages & Plugins
         run: |
           pip install --upgrade pip
           pip install --upgrade yt-dlp
           pip install -r requirements.txt
-
-      - name: Verify everything
-        run: |
-          echo "=== Versions ==="
-          echo "yt-dlp: $(yt-dlp --version)"
-          echo "Python: $(python --version)"
-          echo "Node: $(node --version)"
-          echo "FFmpeg: $(ffmpeg -version 2>&1 | head -1)"
           
-          # Check deno
-          if [ -f "$HOME/.deno/bin/deno" ]; then
-            echo "Deno: $($HOME/.deno/bin/deno --version 2>&1 | head -1)"
-          else
-            echo "Deno: NOT FOUND (using Node.js)"
-          fi
-          
-          echo ""
-          echo "=== IPs ==="
-          echo -n "GitHub IP: "
-          curl -s https://httpbin.org/ip | grep origin
-          echo -n "Tor IP: "
-          curl -s --socks5-hostname 127.0.0.1:9050 https://httpbin.org/ip | grep origin || echo "Tor not ready"
+          # Install the PO Token Plugin provider
+          npm install -g yt-dlp-get-pot
 
       - name: Run pipeline
         env:
@@ -125,16 +66,11 @@ jobs:
           SPEED: ${{ github.event.inputs.speed || '1.05' }}
           PRIVACY: "public"
           ORDER: ${{ github.event.inputs.order || 'oldest' }}
-          DENO_DIR: ${{ github.workspace }}/.deno_cache
-          PATH: /home/runner/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         run: python main.py
 
       - name: Cleanup
         if: always()
-        run: |
-          rm -f cookies.txt yt_oauth.json
-          rm -rf dl/ out/
-          sudo service tor stop || true
+        run: rm -f cookies.txt
 
       - name: Save history
         if: always()
