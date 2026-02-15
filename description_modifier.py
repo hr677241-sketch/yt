@@ -2,7 +2,7 @@ import random
 import re
 
 
-# ============ INTRO PARAGRAPHS (added at top) ============
+# ============ INTRO PARAGRAPHS ============
 INTROS = [
     "In this video, we're going to explore something really interesting. Make sure you watch till the end!\n\n",
     "Hey everyone! Welcome back to the channel. Today we have something special for you.\n\n",
@@ -14,38 +14,55 @@ INTROS = [
     "Hello friends! Today's video is packed with value. Make sure to watch it completely.\n\n",
     "Welcome! This video will change the way you think about this topic. Let's begin!\n\n",
     "What's going on everyone! You asked for it, and here it is. Let's dive in!\n\n",
+    "🔥 This is something you DON'T want to miss! Watch till the end for the best part!\n\n",
+    "⚡ Get ready for something incredible! This video is going to blow your mind!\n\n",
 ]
 
-# ============ CALL TO ACTION (added in middle) ============
+# ============ CALL TO ACTION ============
 CTAS = [
-    "\n\n👍 If you enjoyed this video, please LIKE and SUBSCRIBE!\n",
-    "\n\n🔔 Hit the bell icon to never miss an update!\n",
-    "\n\n💬 Drop a comment below and let us know your thoughts!\n",
-    "\n\n📢 Share this video with someone who needs to see this!\n",
-    "\n\n⭐ Don't forget to subscribe for more amazing content!\n",
-    "\n\n🙏 Your support means everything! Like & Subscribe!\n",
+    "\n\n👍 If you enjoyed this video, please LIKE and SUBSCRIBE for more!\n",
+    "\n\n🔔 Hit the bell icon to never miss an update! New videos daily!\n",
+    "\n\n💬 Drop a comment below and let us know your thoughts! We read every comment!\n",
+    "\n\n📢 Share this video with someone who needs to see this! Help us reach more people!\n",
+    "\n\n⭐ Don't forget to subscribe for more amazing content every week!\n",
+    "\n\n🙏 Your support means everything! Like, Subscribe & Share!\n",
+    "\n\n🚀 SMASH that like button if you found this helpful! Subscribe for daily content!\n",
+    "\n\n💯 If this helped you, hit LIKE and SUBSCRIBE! Turn on notifications! 🔔\n",
 ]
 
-# ============ OUTROS (added at end) ============
+# ============ OUTROS ============
 OUTROS = [
-    "\n\n━━━━━━━━━━━━━━━━━━━━\n📌 Follow us for more content!\n\nDisclaimer: This video is for educational purposes only.\n",
+    "\n\n━━━━━━━━━━━━━━━━━━━━\n📌 Follow us for more content!\n\nDisclaimer: This video is for educational & entertainment purposes only.\n",
     "\n\n━━━━━━━━━━━━━━━━━━━━\n🎯 More videos coming soon - Stay tuned!\n\nAll rights belong to respective owners.\n",
-    "\n\n━━━━━━━━━━━━━━━━━━━━\n🌟 Thank you for watching!\n\nFair use - educational content.\n",
-    "\n\n━━━━━━━━━━━━━━━━━━━━\n✅ New videos every week!\n\nContent used under fair use.\n",
+    "\n\n━━━━━━━━━━━━━━━━━━━━\n🌟 Thank you for watching! See you in the next one!\n\nFair use - educational content.\n",
+    "\n\n━━━━━━━━━━━━━━━━━━━━\n✅ New videos every day! Subscribe now!\n\nContent used under fair use guidelines.\n",
+    "\n\n━━━━━━━━━━━━━━━━━━━━\n🔥 Don't miss our other videos! Check the channel!\n\nFor educational purposes only.\n",
 ]
 
-# ============ ASIA HASHTAGS (FIXED BLOCK) ============
-ASIA_HASHTAGS = [
-    "#Shorts",
-    "#YouTubeShorts",
-    "#ViralShorts",
-    "#TrendingShorts",
-    "#IndianCreators",
-    "#CreatorLife",
-    "#ContentCreators",
-    "#ComedyShorts",
-    "#LearnOnYouTube",
-    "#ExploreShorts"
+# ============ HASHTAG POOLS FOR DESCRIPTIONS ============
+# These are DIFFERENT from title hashtags to maximize unique hashtag coverage
+# YouTube allows max 15 unique hashtags (title + description combined)
+
+DESC_HASHTAG_POOL_SHORT = [
+    "#YouTubeShorts", "#ViralShorts", "#TrendingShorts", "#ShortsFeed",
+    "#ShortsVideo", "#IndianCreators", "#ContentCreator", "#CreatorLife",
+    "#Reels", "#ViralVideo", "#TrendingNow", "#Subscribe",
+    "#NewVideo", "#ComedyShorts", "#LearnOnYouTube", "#ExploreShorts",
+    "#ShortsTrending", "#ShortsViral", "#DailyShorts", "#BestShorts",
+    "#TopShorts", "#FunnyShorts", "#EducationalShorts", "#ShortsIndia",
+    "#EntertainmentShorts", "#LifeHacks", "#DidYouKnow", "#WatchThis",
+    "#ShortsFun", "#YoutuberLife", "#GrowOnYouTube", "#ShortsChallenge",
+]
+
+DESC_HASHTAG_POOL_VIDEO = [
+    "#ViralVideo", "#TrendingNow", "#MustWatchVideo", "#YouTubeVideo",
+    "#ContentCreator", "#IndianCreators", "#CreatorLife", "#NewVideo",
+    "#Subscribe", "#YouTubeChannel", "#FullVideo", "#BestVideo",
+    "#Explore", "#WatchNow", "#VideoOfTheDay", "#DailyVideo",
+    "#EducationalVideo", "#Entertainment", "#TopContent", "#LearnOnYouTube",
+    "#YouTubeGrowth", "#ViralContent", "#TrendingVideo", "#MustSee",
+    "#GrowOnYouTube", "#YouTuber", "#ContentIsKing", "#VideoCreator",
+    "#AmazingVideo", "#LifeHacks", "#DidYouKnow", "#BestOf2024",
 ]
 
 # ============ WORD REPLACEMENTS FOR DESCRIPTIONS ============
@@ -82,7 +99,6 @@ def clean_description(desc):
     cleaned = []
 
     for line in lines:
-        # Skip lines with original channel links
         if any(skip in line.lower() for skip in [
             'instagram.com/', 'twitter.com/', 'facebook.com/',
             'linkedin.com/', 't.me/', 'discord.gg/',
@@ -93,13 +109,14 @@ def clean_description(desc):
         ]):
             continue
 
-        # Skip email addresses
         if re.search(r'[\w\.-]+@[\w\.-]+', line):
             continue
 
-        # Skip phone numbers
         if re.search(r'\+?\d{10,}', line):
             continue
+
+        # Remove existing hashtags from original (we add our own)
+        line = re.sub(r'#\w+', '', line).strip()
 
         cleaned.append(line)
 
@@ -120,12 +137,10 @@ def replace_words_in_desc(desc):
 
 def remove_timestamps(desc):
     """Remove or modify timestamps."""
-    # Remove lines like "0:00 - Intro" or "02:30 Chapter 2"
     lines = desc.split('\n')
     cleaned = []
     for line in lines:
         if re.match(r'^\s*\d{1,2}:\d{2}', line):
-            # 50% chance to remove timestamps
             if random.random() < 0.5:
                 continue
         cleaned.append(line)
@@ -133,31 +148,65 @@ def remove_timestamps(desc):
 
 
 def build_hashtag_block(is_short):
-    """Return the hashtag block as a string."""
+    """
+    Build a large hashtag block for the description.
+    Picks 10-12 random hashtags from the pool.
+    These are DIFFERENT from title hashtags for maximum unique coverage.
+    """
     if is_short:
-        # Ensure #Shorts is first, then the rest (avoid duplicate)
-        hashtags = list(ASIA_HASHTAGS)
-        if "#Shorts" in hashtags:
-            hashtags.remove("#Shorts")
-        hashtags.insert(0, "#Shorts")
-        return "\n\n" + " ".join(hashtags)
+        pool = DESC_HASHTAG_POOL_SHORT
     else:
-        # For regular videos, use the full set
-        return "\n\n" + " ".join(ASIA_HASHTAGS)
+        pool = DESC_HASHTAG_POOL_VIDEO
+
+    # Pick 10-12 random hashtags
+    count = random.randint(10, 12)
+    selected = random.sample(pool, min(count, len(pool)))
+
+    # Format as a nice block
+    hashtag_block = "\n\n🏷️ TAGS:\n" + " ".join(selected)
+
+    return hashtag_block
+
+
+def build_seo_keywords(title, is_short):
+    """Generate SEO keyword line from title for extra discoverability."""
+    if not title:
+        return ""
+
+    # Extract meaningful words from title (skip short/common words)
+    stop_words = {'the', 'a', 'an', 'is', 'it', 'in', 'on', 'at', 'to',
+                  'for', 'of', 'and', 'or', 'but', 'not', 'with', 'this',
+                  'that', 'from', 'by', 'as', 'are', 'was', 'be', 'has',
+                  'had', 'do', 'does', 'did', 'will', 'can', 'could',
+                  'would', 'should', 'may', 'might', 'shall', 'so', 'if',
+                  'how', 'what', 'when', 'where', 'who', 'why', 'which'}
+
+    # Remove hashtags and special chars from title
+    clean_title = re.sub(r'#\w+', '', title)
+    clean_title = re.sub(r'[^\w\s]', '', clean_title)
+    words = [w.lower() for w in clean_title.split() if w.lower() not in stop_words and len(w) > 2]
+
+    if not words:
+        return ""
+
+    # Build keyword phrases
+    keywords = list(set(words))[:8]
+    random.shuffle(keywords)
+
+    return "\n\n🔍 Keywords: " + ", ".join(keywords)
 
 
 def modify_description(original_desc, new_title="", is_short=False):
     """
-    Main function: take original description → return unique description.
-    Now accepts is_short flag to build the correct hashtag block.
+    Main function: take original description → return unique description
+    with full hashtag blocks for maximum reach.
     """
     if not original_desc or len(original_desc.strip()) < 10:
-        # If no description, generate one
         return generate_fresh_description(new_title, is_short)
 
     desc = original_desc.strip()
 
-    # Step 1: Clean (remove social links, emails etc)
+    # Step 1: Clean (remove social links, emails, old hashtags)
     desc = clean_description(desc)
 
     # Step 2: Remove/modify timestamps
@@ -179,16 +228,19 @@ def modify_description(original_desc, new_title="", is_short=False):
     # Step 7: Add outro
     outro = random.choice(OUTROS)
 
-    # Step 8: Add fixed Asia hashtags (instead of random HASHTAG_SETS)
+    # Step 8: Add SEO keywords from title
+    seo = build_seo_keywords(new_title, is_short)
+
+    # Step 9: Add hashtag block (10-12 hashtags)
     hashtags = build_hashtag_block(is_short)
 
     # Build final description
-    final = intro + desc + cta + outro + hashtags
+    final = intro + desc + cta + outro + seo + hashtags
 
     # Clean up multiple blank lines
     final = re.sub(r'\n{4,}', '\n\n\n', final)
 
-    return final[:5000]  # YouTube max description length
+    return final[:5000]
 
 
 def generate_fresh_description(title="", is_short=False):
@@ -196,21 +248,36 @@ def generate_fresh_description(title="", is_short=False):
     intro = random.choice(INTROS)
     cta = random.choice(CTAS)
     outro = random.choice(OUTROS)
+    seo = build_seo_keywords(title, is_short)
     hashtags = build_hashtag_block(is_short)
 
-    middle = f"This video covers: {title}\n\nWe hope you find this content helpful and informative." if title else ""
+    if title:
+        # Clean title of hashtags for the description text
+        clean_title = re.sub(r'#\w+', '', title).strip()
+        middle = (
+            f"📌 This video covers: {clean_title}\n\n"
+            f"We hope you find this content helpful and informative.\n"
+            f"If you enjoy this type of content, make sure to SUBSCRIBE "
+            f"and turn on notifications so you never miss an upload!"
+        )
+    else:
+        middle = (
+            "We hope you find this content helpful and informative.\n"
+            "If you enjoy this type of content, make sure to SUBSCRIBE "
+            "and turn on notifications so you never miss an upload!"
+        )
 
-    return (intro + middle + cta + outro + hashtags)[:5000]
+    return (intro + middle + cta + outro + seo + hashtags)[:5000]
 
 
 def modify_tags(original_tags):
-    """Modify and expand tags."""
+    """Modify and expand tags for maximum discoverability."""
     if not original_tags:
         original_tags = []
 
     new_tags = []
 
-    for tag in original_tags[:15]:
+    for tag in original_tags[:12]:
         new_tags.append(tag)
 
         # Add variations
@@ -220,21 +287,27 @@ def modify_tags(original_tags):
             new_tags.append(tag + " tutorial")
         if random.random() < 0.3:
             new_tags.append("best " + tag)
+        if random.random() < 0.2:
+            new_tags.append(tag + " hindi")
 
-    # Add generic trending tags
-    extra = [
-        "trending", "viral", "must watch", "latest",
-        "how to", "tutorial", "guide", "tips",
-        "2024", "new", "best", "top",
+    # Add viral/trending tags
+    viral_tags = [
+        "trending", "viral", "viral video", "must watch",
+        "trending now", "latest", "new video", "top video",
+        "how to", "tutorial", "guide", "tips and tricks",
+        "2024", "new", "best", "top", "amazing",
+        "shorts", "youtube shorts", "viral shorts",
+        "indian creator", "content creator", "subscribe",
+        "explore", "fyp", "for you", "trending today",
     ]
-    random.shuffle(extra)
-    new_tags.extend(extra[:5])
+    random.shuffle(viral_tags)
+    new_tags.extend(viral_tags[:10])
 
     # Remove duplicates, limit to 30
     seen = set()
     unique = []
     for t in new_tags:
-        if t.lower() not in seen:
+        if t.lower() not in seen and len(t.strip()) > 0:
             seen.add(t.lower())
             unique.append(t)
 
@@ -257,14 +330,18 @@ Email: chef@example.com
 Don't forget to subscribe and hit the like button!
 Check out my other videos for more recipes."""
 
+    print("=" * 60)
     print("ORIGINAL:")
     print(test_desc)
     print("\n" + "=" * 60)
-    print("\nMODIFIED (standard video):")
-    print(modify_description(test_desc, "How to Cook Pasta", is_short=False))
+    print("\nMODIFIED (VIDEO):")
+    print(modify_description(test_desc, "🔥 How to Cook Pasta #Viral #Trending #MustWatch", is_short=False))
     print("\n" + "=" * 60)
-    print("\nMODIFIED (Shorts):")
-    print(modify_description(test_desc, "How to Cook Pasta", is_short=True))
+    print("\nMODIFIED (SHORT):")
+    print(modify_description(test_desc, "😱 Pasta Hack #Shorts #Viral #Trending", is_short=True))
+    print("\n" + "=" * 60)
+    print("\nFRESH DESCRIPTION:")
+    print(generate_fresh_description("Amazing Cooking Tips", is_short=True))
     print("\n" + "=" * 60)
     print("\nMODIFIED TAGS:")
     print(modify_tags(["pasta", "cooking", "recipe", "food"]))
