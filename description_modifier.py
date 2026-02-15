@@ -34,14 +34,18 @@ OUTROS = [
     "\n\n━━━━━━━━━━━━━━━━━━━━\n✅ New videos every week!\n\nContent used under fair use.\n",
 ]
 
-# ============ HASHTAGS ============
-HASHTAG_SETS = [
-    "\n\n#trending #viral #youtube #mustwatch #explore",
-    "\n\n#viral #trending #recommended #foryou #content",
-    "\n\n#explore #discover #trending #top #best",
-    "\n\n#youtube #video #trending #popular #watch",
-    "\n\n#new #latest #trending #hot #viral",
-    "\n\n#amazing #incredible #trending #fyp #subscribe",
+# ============ ASIA HASHTAGS (FIXED BLOCK) ============
+ASIA_HASHTAGS = [
+    "#Shorts",
+    "#YouTubeShorts",
+    "#ViralShorts",
+    "#TrendingShorts",
+    "#IndianCreators",
+    "#CreatorLife",
+    "#ContentCreators",
+    "#ComedyShorts",
+    "#LearnOnYouTube",
+    "#ExploreShorts"
 ]
 
 # ============ WORD REPLACEMENTS FOR DESCRIPTIONS ============
@@ -128,13 +132,28 @@ def remove_timestamps(desc):
     return '\n'.join(cleaned)
 
 
-def modify_description(original_desc, new_title=""):
+def build_hashtag_block(is_short):
+    """Return the hashtag block as a string."""
+    if is_short:
+        # Ensure #Shorts is first, then the rest (avoid duplicate)
+        hashtags = list(ASIA_HASHTAGS)
+        if "#Shorts" in hashtags:
+            hashtags.remove("#Shorts")
+        hashtags.insert(0, "#Shorts")
+        return "\n\n" + " ".join(hashtags)
+    else:
+        # For regular videos, use the full set
+        return "\n\n" + " ".join(ASIA_HASHTAGS)
+
+
+def modify_description(original_desc, new_title="", is_short=False):
     """
     Main function: take original description → return unique description.
+    Now accepts is_short flag to build the correct hashtag block.
     """
     if not original_desc or len(original_desc.strip()) < 10:
         # If no description, generate one
-        return generate_fresh_description(new_title)
+        return generate_fresh_description(new_title, is_short)
 
     desc = original_desc.strip()
 
@@ -160,8 +179,8 @@ def modify_description(original_desc, new_title=""):
     # Step 7: Add outro
     outro = random.choice(OUTROS)
 
-    # Step 8: Add hashtags
-    hashtags = random.choice(HASHTAG_SETS)
+    # Step 8: Add fixed Asia hashtags (instead of random HASHTAG_SETS)
+    hashtags = build_hashtag_block(is_short)
 
     # Build final description
     final = intro + desc + cta + outro + hashtags
@@ -172,12 +191,12 @@ def modify_description(original_desc, new_title=""):
     return final[:5000]  # YouTube max description length
 
 
-def generate_fresh_description(title=""):
+def generate_fresh_description(title="", is_short=False):
     """Generate a completely new description if original is empty."""
     intro = random.choice(INTROS)
     cta = random.choice(CTAS)
     outro = random.choice(OUTROS)
-    hashtags = random.choice(HASHTAG_SETS)
+    hashtags = build_hashtag_block(is_short)
 
     middle = f"This video covers: {title}\n\nWe hope you find this content helpful and informative." if title else ""
 
@@ -241,8 +260,11 @@ Check out my other videos for more recipes."""
     print("ORIGINAL:")
     print(test_desc)
     print("\n" + "=" * 60)
-    print("\nMODIFIED:")
-    print(modify_description(test_desc, "How to Cook Pasta"))
+    print("\nMODIFIED (standard video):")
+    print(modify_description(test_desc, "How to Cook Pasta", is_short=False))
+    print("\n" + "=" * 60)
+    print("\nMODIFIED (Shorts):")
+    print(modify_description(test_desc, "How to Cook Pasta", is_short=True))
     print("\n" + "=" * 60)
     print("\nMODIFIED TAGS:")
     print(modify_tags(["pasta", "cooking", "recipe", "food"]))
