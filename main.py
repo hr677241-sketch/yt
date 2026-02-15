@@ -582,10 +582,7 @@ def main():
             print(f"   NEW: {new_title[:50]}")
 
             # ── MODIFY DESCRIPTION ──
-            new_desc = modify_description(meta.get('desc', ''), new_title)
-            if is_short and '#shorts' not in new_desc.lower():
-                new_desc = "#Shorts\n\n" + new_desc
-
+            new_desc = modify_description(meta.get('desc', ''), new_title, is_short=is_short)
             # ── MODIFY TAGS ──
             new_tags = modify_tags(meta.get('tags', []))
             if is_short:
