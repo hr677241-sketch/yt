@@ -1,6 +1,6 @@
-pytubefix>=8.0.0
 yt-dlp>=2025.1.1
 google-api-python-client
 google-auth-oauthlib
 google-auth-httplib2
 requests
+PySocks
