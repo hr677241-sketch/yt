@@ -138,36 +138,105 @@ def _fetch_listing(url):
     return []
 
 
+# ====================== METADATA FETCH ======================
+def fetch_metadata_via_tor(url, vid):
+    """Fetch title, description, tags via Tor WITHOUT downloading."""
+    try:
+        opts = {
+            'quiet': True,
+            'proxy': TOR_PROXY,
+            'skip_download': True,
+            'ignoreerrors': True,
+            'no_warnings': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web'],
+                }
+            },
+        }
+        with yt_dlp.YoutubeDL(opts) as y:
+            info = y.extract_info(url, download=False)
+            if info:
+                return {
+                    'title': info.get('title', '') or '',
+                    'desc': info.get('description', '') or '',
+                    'tags': info.get('tags', []) or [],
+                }
+    except:
+        pass
+
+    # Fallback: try without proxy
+    try:
+        opts2 = {
+            'quiet': True,
+            'skip_download': True,
+            'ignoreerrors': True,
+        }
+        with yt_dlp.YoutubeDL(opts2) as y:
+            info = y.extract_info(url, download=False)
+            if info:
+                return {
+                    'title': info.get('title', '') or '',
+                    'desc': info.get('description', '') or '',
+                    'tags': info.get('tags', []) or [],
+                }
+    except:
+        pass
+
+    return None
+
+
 # ====================== DOWNLOAD ======================
 def download(url, vid, content_type="video"):
     os.makedirs("dl", exist_ok=True)
     file_path = f"dl/{vid}.mp4"
     _clean_files(vid)
 
+    # ── STEP 1: Fetch metadata first (title/desc/tags) ──
+    print("   📋 Fetching metadata...")
+    meta_info = fetch_metadata_via_tor(url, vid)
+    if meta_info and meta_info.get('title'):
+        print(f"   📋 Got: {meta_info['title'][:50]}")
+    else:
+        print("   📋 Metadata fetch failed, will use fallback")
+        meta_info = {'title': '', 'desc': '', 'tags': []}
+
+    # ── STEP 2: Download video ──
+    # Tor works, direct doesn't — prioritize Tor
     strategies = [
-        ("Web client",         _download_web,         {}),
-        ("TV embedded client", _download_tv_embedded,  {}),
-        ("mWeb client",        _download_mweb,         {}),
-        ("No-cookie web",      _download_no_cookies,   {}),
-        ("No-cookie default",  _download_no_cookies_default, {}),
-        ("Tor CLI",            _download_tor_cli,      {"retries": 1}),
-        ("Tor CLI retry",      _download_tor_cli,      {"retries": 6}),
+        ("Tor (high quality)",    _download_tor_hq,       {"retries": 3}),
+        ("Tor CLI",               _download_tor_cli,      {"retries": 3}),
+        ("Web client + cookies",  _download_web,          {}),
+        ("mWeb client",           _download_mweb,         {}),
+        ("No-cookie default",     _download_no_cookies_default, {}),
+        ("Tor CLI (extended)",    _download_tor_cli,      {"retries": 8}),
     ]
 
     for name, func, kwargs in strategies:
         try:
             print(f"   🔄 {name}...")
-            meta = func(url, vid, file_path, **kwargs)
-            if meta and os.path.exists(file_path) and os.path.getsize(file_path) > 10000:
+            result = func(url, vid, file_path, **kwargs)
+            if result and os.path.exists(file_path) and os.path.getsize(file_path) > 10000:
                 w, h, dur = _get_info(file_path)
-                meta.update({
-                    'file': file_path, 'width': w, 'height': h,
+
+                # Use pre-fetched metadata (reliable) over CLI-extracted (broken)
+                final_title = meta_info.get('title') or result.get('title') or ''
+                final_desc = meta_info.get('desc') or result.get('desc') or ''
+                final_tags = meta_info.get('tags') or result.get('tags') or []
+
+                result.update({
+                    'file': file_path,
+                    'width': w,
+                    'height': h,
                     'duration': dur,
+                    'title': final_title,
+                    'desc': final_desc,
+                    'tags': final_tags,
                     'is_short': content_type == 'short' or dur <= 60 or h > w,
                 })
                 size = os.path.getsize(file_path) / 1024 / 1024
                 print(f"   ✅ OK! {size:.1f}MB | {w}x{h} | {dur:.0f}s")
-                return meta
+                return result
         except Exception as e:
             msg = str(e)[:80]
             print(f"   ❌ {name}: {msg}")
@@ -178,9 +247,9 @@ def download(url, vid, content_type="video"):
 
 
 def _base_opts(vid, use_cookies=True):
-    """Common yt-dlp options — ALL SUBTITLES DISABLED."""
+    """Common yt-dlp options."""
     opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+        'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[ext=mp4]/best',
         'outtmpl': f'dl/{vid}.%(ext)s',
         'merge_output_format': 'mp4',
         'quiet': False,
@@ -188,7 +257,6 @@ def _base_opts(vid, use_cookies=True):
         'retries': 3,
         'socket_timeout': 30,
         'no_warnings': False,
-        # ===== NO SUBTITLES =====
         'writesubtitles': False,
         'writeautomaticsub': False,
         'embedsubtitles': False,
@@ -203,7 +271,76 @@ def _base_opts(vid, use_cookies=True):
     return opts
 
 
-# ---------- Strategy 1: Web client + cookies ----------
+# ---------- Strategy: Tor High Quality (Python API via proxy) ----------
+def _download_tor_hq(url, vid, output, retries=3):
+    """Download via Tor using yt-dlp Python API with proxy."""
+    for attempt in range(1, retries + 1):
+        _clean_files(vid)
+        if retries > 1:
+            print(f"      Attempt {attempt}/{retries}")
+
+        try:
+            opts = {
+                'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[ext=mp4]/best',
+                'outtmpl': f'dl/{vid}.%(ext)s',
+                'merge_output_format': 'mp4',
+                'quiet': False,
+                'ignoreerrors': False,
+                'retries': 3,
+                'socket_timeout': 45,
+                'proxy': TOR_PROXY,
+                'writesubtitles': False,
+                'writeautomaticsub': False,
+                'embedsubtitles': False,
+                'subtitleslangs': [],
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['web'],
+                    }
+                },
+                'postprocessors': [{
+                    'key': 'FFmpegVideoRemuxer',
+                    'preferedformat': 'mp4',
+                }],
+            }
+
+            with yt_dlp.YoutubeDL(opts) as y:
+                info = y.extract_info(url, download=True)
+
+            if not info:
+                if attempt < retries:
+                    renew_tor()
+                continue
+
+            _delete_subtitle_files(vid)
+
+            found = _find_file(vid)
+            if found and found != output:
+                if not found.endswith('.mp4'):
+                    _to_mp4(found, output)
+                else:
+                    os.rename(found, output)
+
+            if os.path.exists(output) and os.path.getsize(output) > 10000:
+                _strip_subs_from_file(output)
+                return {
+                    'id': vid,
+                    'title': info.get('title', '') or '',
+                    'desc': info.get('description', '') or '',
+                    'tags': info.get('tags', []) or [],
+                }
+
+        except Exception as e:
+            err = str(e).lower()
+            if 'sign in' in err or 'bot' in err or 'http error 403' in err:
+                if attempt < retries:
+                    renew_tor()
+            continue
+
+    raise Exception("Tor HQ download failed")
+
+
+# ---------- Strategy: Web client + cookies ----------
 def _download_web(url, vid, output):
     opts = _base_opts(vid, use_cookies=True)
     opts['extractor_args'] = {
@@ -214,47 +351,24 @@ def _download_web(url, vid, output):
     return _run_ytdlp(url, vid, output, opts)
 
 
-# ---------- Strategy 2: TV embedded + cookies ----------
-def _download_tv_embedded(url, vid, output):
-    opts = _base_opts(vid, use_cookies=True)
-    opts['extractor_args'] = {
-        'youtube': {
-            'player_client': ['tv_embedded', 'web'],
-        }
-    }
-    return _run_ytdlp(url, vid, output, opts)
-
-
-# ---------- Strategy 3: mWeb + cookies ----------
+# ---------- Strategy: mWeb + cookies ----------
 def _download_mweb(url, vid, output):
     opts = _base_opts(vid, use_cookies=True)
     opts['extractor_args'] = {
         'youtube': {
-            'player_client': ['mweb', 'web'],
+            'player_client': ['mweb'],
         }
     }
     return _run_ytdlp(url, vid, output, opts)
 
 
-# ---------- Strategy 4: No cookies, web client ----------
-def _download_no_cookies(url, vid, output):
-    opts = _base_opts(vid, use_cookies=False)
-    opts['extractor_args'] = {
-        'youtube': {
-            'player_client': ['web'],
-        }
-    }
-    return _run_ytdlp(url, vid, output, opts)
-
-
-# ---------- Strategy 5: No cookies, let yt-dlp decide ----------
+# ---------- Strategy: No cookies, let yt-dlp decide ----------
 def _download_no_cookies_default(url, vid, output):
     opts = _base_opts(vid, use_cookies=False)
-    # No extractor_args — let yt-dlp pick the best client automatically
     return _run_ytdlp(url, vid, output, opts)
 
 
-# ---------- Strategy 6-7: Tor CLI ----------
+# ---------- Strategy: Tor CLI ----------
 def _download_tor_cli(url, vid, output, retries=1):
     deno = find_deno()
 
@@ -266,32 +380,28 @@ def _download_tor_cli(url, vid, output, retries=1):
 
         cmd = [
             "torsocks", "yt-dlp",
-            "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
+            "--format", "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[ext=mp4]/best",
             "--output", f"dl/{vid}.%(ext)s",
             "--merge-output-format", "mp4",
             "--retries", "3",
-            "--socket-timeout", "30",
+            "--socket-timeout", "45",
             "--no-check-certificates",
-            # ===== Force web client (NOT ios/android) =====
             "--extractor-args", "youtube:player_client=web",
-            # ===== NO SUBTITLES =====
             "--no-write-subs",
             "--no-write-auto-subs",
             "--no-embed-subs",
             "--sub-langs", "",
+            # Write info JSON so we can get title
+            "--write-info-json",
         ]
 
         if deno:
             cmd.extend(["--js-runtimes", f"deno:{deno}"])
 
-        # Use cookies with Tor only if available
-        if os.path.exists(COOKIES_FILE):
-            cmd.extend(["--cookies", COOKIES_FILE])
-
         cmd.append(url)
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
 
             found = _find_file(vid)
             if found:
@@ -302,13 +412,21 @@ def _download_tor_cli(url, vid, output, retries=1):
                         os.rename(found, output)
 
                 if os.path.exists(output) and os.path.getsize(output) > 10000:
+                    # Get title from info JSON if available
+                    title, desc, tags = _read_info_json(vid)
+
+                    # Cleanup info json
+                    _delete_info_json(vid)
+
                     return {
                         'id': vid,
-                        'title': _extract_title(result.stdout, vid),
-                        'desc': '', 'tags': [],
+                        'title': title,
+                        'desc': desc,
+                        'tags': tags,
                     }
 
-            if "Sign in" in result.stderr or "bot" in result.stderr.lower():
+            stderr = result.stderr if result.stderr else ''
+            if "Sign in" in stderr or "bot" in stderr.lower():
                 if attempt < retries:
                     renew_tor()
                 continue
@@ -328,7 +446,6 @@ def _run_ytdlp(url, vid, output, opts):
     if not info:
         raise Exception("No info returned")
 
-    # Delete any subtitle files that got created anyway
     _delete_subtitle_files(vid)
 
     found = _find_file(vid)
@@ -341,13 +458,12 @@ def _run_ytdlp(url, vid, output, opts):
     if not os.path.exists(output) or os.path.getsize(output) < 10000:
         raise Exception("File missing or too small")
 
-    # Strip subtitles from the mp4 container just in case
     _strip_subs_from_file(output)
 
     return {
         'id': vid,
-        'title': info.get('title', 'Untitled'),
-        'desc': info.get('description', ''),
+        'title': info.get('title', '') or '',
+        'desc': info.get('description', '') or '',
         'tags': info.get('tags', []) or [],
     }
 
@@ -361,12 +477,47 @@ def _find_file(vid):
     return None
 
 
+def _read_info_json(vid):
+    """Read title/desc/tags from .info.json written by yt-dlp CLI."""
+    json_path = f'dl/{vid}.info.json'
+    if not os.path.exists(json_path):
+        # Try finding it
+        for f in os.listdir('dl'):
+            if f.startswith(vid) and f.endswith('.info.json'):
+                json_path = f'dl/{f}'
+                break
+
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            title = data.get('title', '') or ''
+            desc = data.get('description', '') or ''
+            tags = data.get('tags', []) or []
+            print(f"      📋 From info.json: {title[:50]}")
+            return title, desc, tags
+        except:
+            pass
+
+    return '', '', []
+
+
+def _delete_info_json(vid):
+    """Delete info JSON files."""
+    dl_dir = "dl"
+    if not os.path.exists(dl_dir):
+        return
+    for f in os.listdir(dl_dir):
+        if f.startswith(vid) and f.endswith('.info.json'):
+            os.remove(os.path.join(dl_dir, f))
+
+
 def _clean_files(vid):
-    """Remove all temp files INCLUDING subtitle files."""
+    """Remove all temp files."""
     for ext in ['mp4', 'webm', 'mkv', 'part', 'f251.webm', 'f140.m4a',
                 'flv', 'avi', '_v.tmp', '_a.tmp',
                 'srt', 'vtt', 'ass', 'ssa', 'sub', 'lrc', 'ttml', 'srv1',
-                'srv2', 'srv3', 'json3']:
+                'srv2', 'srv3', 'json3', 'info.json']:
         p = f'dl/{vid}.{ext}'
         if os.path.exists(p):
             os.remove(p)
@@ -375,6 +526,7 @@ def _clean_files(vid):
         if os.path.exists(p):
             os.remove(p)
     _delete_subtitle_files(vid)
+    _delete_info_json(vid)
 
 
 def _delete_subtitle_files(vid):
@@ -452,21 +604,6 @@ def _get_info(path):
         return 1920, 1080, 0
 
 
-def _extract_title(stdout, vid):
-    if not stdout:
-        return "Untitled"
-    for line in stdout.split('\n'):
-        if 'Destination:' in line:
-            parts = line.split('Destination:')
-            if len(parts) > 1:
-                name = parts[1].strip()
-                name = re.sub(r'\.[a-z0-9]+$', '', name)
-                name = name.replace(vid, '').strip(' ._-')
-                if name:
-                    return name
-    return "Untitled"
-
-
 # ====================== VIDEO MODIFICATION ======================
 def detect_type(meta, original_type):
     if original_type == 'short':
@@ -479,7 +616,7 @@ def detect_type(meta, original_type):
 
 
 def modify_video(inp, out, speed, is_short=False):
-    """Apply all anti-copyright modifications — NO SUBTITLES."""
+    """Apply all anti-copyright modifications."""
     os.makedirs("out", exist_ok=True)
 
     if is_short:
@@ -599,10 +736,9 @@ def upload_video(yt, path, title, desc, tags, privacy):
 # ====================== MAIN ======================
 def main():
     print("=" * 60)
-    print("🚀 YouTube Auto Pipeline v2 — Fixed Clients")
+    print("🚀 YouTube Auto Pipeline v3")
     print("=" * 60)
 
-    # Print yt-dlp version for debugging
     try:
         print(f"📦 yt-dlp version: {yt_dlp.version.__version__}")
     except:
@@ -616,7 +752,7 @@ def main():
     if has_cookies:
         print("   ✅ Cookies file ready")
     else:
-        print("   ⚠️ No cookies — will try without")
+        print("   ⚠️ No cookies — will rely on Tor")
 
     history = load_history()
     print(f"📜 Already uploaded: {len(history)}")
@@ -668,8 +804,18 @@ def main():
             out_file = f"out/{v['id']}_mod.mp4"
             modify_video(meta['file'], out_file, SPEED, is_short)
 
-            # ── MODIFY TITLE ──
-            original_title = meta.get('title') or v.get('title') or 'Untitled'
+            # ── GET BEST TITLE ──
+            # Priority: metadata from download > channel listing title > fallback
+            original_title = (
+                meta.get('title')
+                or v.get('title')
+                or 'Untitled'
+            ).strip()
+
+            # Safety: reject garbage titles
+            if original_title in ['', 'Untitled', 'dl/', 'dl', '.', '..']:
+                original_title = v.get('title', 'Untitled')
+
             new_title = modify_title(original_title, is_short=is_short)
 
             print(f"\n📝 Title:")
@@ -708,12 +854,12 @@ def main():
                 if os.path.exists(f):
                     os.remove(f)
 
-            # Wait between videos
+            # Wait between videos — use env var from .yml
             if i < len(batch) - 1:
                 d_min = int(os.environ.get("INTER_DELAY_MIN", "30"))
                 d_max = int(os.environ.get("INTER_DELAY_MAX", "180"))
                 wait = random.randint(d_min, d_max)
-                print(f"\n⏳ Waiting {wait}s...")
+                print(f"\n⏳ Waiting {wait}s between uploads...")
                 time.sleep(wait)
 
         except Exception as e:
