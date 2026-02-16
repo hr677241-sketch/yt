@@ -145,10 +145,13 @@ def download(url, vid, content_type="video"):
     _clean_files(vid)
 
     strategies = [
-        ("iOS direct",    _download_ios,     {}),
-        ("Android direct",_download_android, {}),
-        ("Tor CLI",       _download_tor_cli, {"retries": 1}),
-        ("Tor CLI retry", _download_tor_cli, {"retries": 8}),
+        ("Web client",         _download_web,         {}),
+        ("TV embedded client", _download_tv_embedded,  {}),
+        ("mWeb client",        _download_mweb,         {}),
+        ("No-cookie web",      _download_no_cookies,   {}),
+        ("No-cookie default",  _download_no_cookies_default, {}),
+        ("Tor CLI",            _download_tor_cli,      {"retries": 1}),
+        ("Tor CLI retry",      _download_tor_cli,      {"retries": 6}),
     ]
 
     for name, func, kwargs in strategies:
@@ -174,16 +177,17 @@ def download(url, vid, content_type="video"):
     raise Exception(f"All download methods failed for {vid}")
 
 
-def _base_opts(vid):
+def _base_opts(vid, use_cookies=True):
     """Common yt-dlp options — ALL SUBTITLES DISABLED."""
     opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
         'outtmpl': f'dl/{vid}.%(ext)s',
         'merge_output_format': 'mp4',
         'quiet': False,
         'ignoreerrors': False,
         'retries': 3,
         'socket_timeout': 30,
+        'no_warnings': False,
         # ===== NO SUBTITLES =====
         'writesubtitles': False,
         'writeautomaticsub': False,
@@ -194,39 +198,63 @@ def _base_opts(vid):
             'preferedformat': 'mp4',
         }],
     }
-    if os.path.exists(COOKIES_FILE):
+    if use_cookies and os.path.exists(COOKIES_FILE):
         opts['cookiefile'] = COOKIES_FILE
     return opts
 
 
-def _download_ios(url, vid, output):
-    opts = _base_opts(vid)
+# ---------- Strategy 1: Web client + cookies ----------
+def _download_web(url, vid, output):
+    opts = _base_opts(vid, use_cookies=True)
     opts['extractor_args'] = {
         'youtube': {
-            'player_client': ['ios'],
-            'player_skip': ['webpage', 'configs'],
+            'player_client': ['web'],
         }
-    }
-    opts['http_headers'] = {
-        'User-Agent': 'com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)',
     }
     return _run_ytdlp(url, vid, output, opts)
 
 
-def _download_android(url, vid, output):
-    opts = _base_opts(vid)
+# ---------- Strategy 2: TV embedded + cookies ----------
+def _download_tv_embedded(url, vid, output):
+    opts = _base_opts(vid, use_cookies=True)
     opts['extractor_args'] = {
         'youtube': {
-            'player_client': ['android'],
-            'player_skip': ['webpage', 'configs'],
+            'player_client': ['tv_embedded', 'web'],
         }
-    }
-    opts['http_headers'] = {
-        'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 14; en_US) gzip',
     }
     return _run_ytdlp(url, vid, output, opts)
 
 
+# ---------- Strategy 3: mWeb + cookies ----------
+def _download_mweb(url, vid, output):
+    opts = _base_opts(vid, use_cookies=True)
+    opts['extractor_args'] = {
+        'youtube': {
+            'player_client': ['mweb', 'web'],
+        }
+    }
+    return _run_ytdlp(url, vid, output, opts)
+
+
+# ---------- Strategy 4: No cookies, web client ----------
+def _download_no_cookies(url, vid, output):
+    opts = _base_opts(vid, use_cookies=False)
+    opts['extractor_args'] = {
+        'youtube': {
+            'player_client': ['web'],
+        }
+    }
+    return _run_ytdlp(url, vid, output, opts)
+
+
+# ---------- Strategy 5: No cookies, let yt-dlp decide ----------
+def _download_no_cookies_default(url, vid, output):
+    opts = _base_opts(vid, use_cookies=False)
+    # No extractor_args — let yt-dlp pick the best client automatically
+    return _run_ytdlp(url, vid, output, opts)
+
+
+# ---------- Strategy 6-7: Tor CLI ----------
 def _download_tor_cli(url, vid, output, retries=1):
     deno = find_deno()
 
@@ -238,12 +266,14 @@ def _download_tor_cli(url, vid, output, retries=1):
 
         cmd = [
             "torsocks", "yt-dlp",
-            "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
             "--output", f"dl/{vid}.%(ext)s",
             "--merge-output-format", "mp4",
             "--retries", "3",
             "--socket-timeout", "30",
             "--no-check-certificates",
+            # ===== Force web client (NOT ios/android) =====
+            "--extractor-args", "youtube:player_client=web",
             # ===== NO SUBTITLES =====
             "--no-write-subs",
             "--no-write-auto-subs",
@@ -254,6 +284,7 @@ def _download_tor_cli(url, vid, output, retries=1):
         if deno:
             cmd.extend(["--js-runtimes", f"deno:{deno}"])
 
+        # Use cookies with Tor only if available
         if os.path.exists(COOKIES_FILE):
             cmd.extend(["--cookies", COOKIES_FILE])
 
@@ -334,7 +365,6 @@ def _clean_files(vid):
     """Remove all temp files INCLUDING subtitle files."""
     for ext in ['mp4', 'webm', 'mkv', 'part', 'f251.webm', 'f140.m4a',
                 'flv', 'avi', '_v.tmp', '_a.tmp',
-                # Subtitle file extensions
                 'srt', 'vtt', 'ass', 'ssa', 'sub', 'lrc', 'ttml', 'srv1',
                 'srv2', 'srv3', 'json3']:
         p = f'dl/{vid}.{ext}'
@@ -344,7 +374,6 @@ def _clean_files(vid):
         p = f'dl/{vid}{suffix}'
         if os.path.exists(p):
             os.remove(p)
-    # Also clean language-specific subtitle files like vid.en.vtt
     _delete_subtitle_files(vid)
 
 
@@ -363,11 +392,7 @@ def _delete_subtitle_files(vid):
 
 
 def _strip_subs_from_file(filepath):
-    """
-    Re-mux the mp4 to remove any embedded subtitle streams.
-    This is the FINAL safety net — even if subtitles got embedded,
-    this removes them from the container.
-    """
+    """Re-mux the mp4 to remove any embedded subtitle streams."""
     if not os.path.exists(filepath):
         return
 
@@ -375,10 +400,10 @@ def _strip_subs_from_file(filepath):
     try:
         cmd = [
             "ffmpeg", "-y", "-i", filepath,
-            "-map", "0:v:0",   # Take ONLY first video stream
-            "-map", "0:a:0",   # Take ONLY first audio stream
-            "-sn",             # NO subtitle streams
-            "-c", "copy",      # No re-encoding (fast)
+            "-map", "0:v:0",
+            "-map", "0:a:0",
+            "-sn",
+            "-c", "copy",
             temp
         ]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -387,7 +412,6 @@ def _strip_subs_from_file(filepath):
             os.replace(temp, filepath)
             print("   🚫 Subtitles stripped from container")
         else:
-            # If it fails, keep original (might not have subs anyway)
             if os.path.exists(temp):
                 os.remove(temp)
     except:
@@ -399,9 +423,9 @@ def _to_mp4(inp, out):
     """Convert to mp4 WITHOUT subtitles."""
     subprocess.run([
         'ffmpeg', '-y', '-i', inp,
-        '-map', '0:v:0',   # Only video
-        '-map', '0:a:0',   # Only audio
-        '-sn',             # No subtitles
+        '-map', '0:v:0',
+        '-map', '0:a:0',
+        '-sn',
         '-c:v', 'libx264',
         '-c:a', 'aac',
         out
@@ -485,18 +509,16 @@ def modify_video(inp, out, speed, is_short=False):
 
     cmd = [
         "ffmpeg", "-y", "-i", inp,
-        # ===== ONLY VIDEO + AUDIO, NO SUBTITLES =====
-        "-map", "0:v:0",      # First video stream only
-        "-map", "0:a:0",      # First audio stream only
-        "-sn",                 # Explicitly no subtitles
+        "-map", "0:v:0",
+        "-map", "0:a:0",
+        "-sn",
         "-filter:v", vf,
         "-filter:a", af,
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
-        # ===== STRIP ALL METADATA =====
-        "-map_metadata", "-1",    # Remove file metadata
-        "-map_chapters", "-1",    # Remove chapters
+        "-map_metadata", "-1",
+        "-map_chapters", "-1",
     ]
 
     if is_short:
@@ -577,14 +599,25 @@ def upload_video(yt, path, title, desc, tags, privacy):
 # ====================== MAIN ======================
 def main():
     print("=" * 60)
-    print("🚀 YouTube Auto Pipeline — NO SUBS Edition")
+    print("🚀 YouTube Auto Pipeline v2 — Fixed Clients")
     print("=" * 60)
+
+    # Print yt-dlp version for debugging
+    try:
+        print(f"📦 yt-dlp version: {yt_dlp.version.__version__}")
+    except:
+        print("📦 yt-dlp version: unknown")
 
     if not SOURCE_URL:
         sys.exit("❌ SOURCE_URL not set!")
 
     # Setup
     has_cookies = setup_cookies()
+    if has_cookies:
+        print("   ✅ Cookies file ready")
+    else:
+        print("   ⚠️ No cookies — will try without")
+
     history = load_history()
     print(f"📜 Already uploaded: {len(history)}")
 
@@ -630,7 +663,7 @@ def main():
             content_type = detect_type(meta, ct)
             is_short = content_type == 'short'
 
-            # ── MODIFY VIDEO (NO SUBTITLES) ──
+            # ── MODIFY VIDEO ──
             print("\n⚡ Modifying video...")
             out_file = f"out/{v['id']}_mod.mp4"
             modify_video(meta['file'], out_file, SPEED, is_short)
