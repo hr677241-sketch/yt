@@ -1,17 +1,16 @@
 name: YouTube Random Auto Pipeline
 
 on:
-  workflow_dispatch: # Allows manual trigger for testing
+  workflow_dispatch:
     inputs:
       force_batch:
         description: 'Force specific batch size (leave empty for random)'
         required: false
   schedule:
-    # Runs every 2 hours (00:00, 02:00, 04:00... UTC)
     - cron: '0 */2 * * *'
 
 permissions:
-  contents: write # Needed to save history.txt
+  contents: write
 
 jobs:
   run:
@@ -19,11 +18,10 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      # 1. Random Delay (Makes the upload time random)
+      # 1. Random Delay
       - name: Randomize Start Time
         if: github.event_name == 'schedule'
         run: |
-          # Generate random number between 60 and 3000 seconds (1 to 50 minutes)
           DELAY=$(( $RANDOM % 3000 + 60 ))
           echo "⏳ Sleeping for $(($DELAY / 60)) minutes to randomize upload time..."
           sleep $DELAY
@@ -32,26 +30,21 @@ jobs:
       - name: Determine Batch Size
         id: randomizer
         run: |
-          # If manually triggered with input, use that
           if [[ "${{ inputs.force_batch }}" != "" ]]; then
             echo "BATCH_SIZE=${{ inputs.force_batch }}" >> $GITHUB_ENV
             echo "✅ Manual override: ${{ inputs.force_batch }}"
           else
-            # Generate random number: 0, 1, or 2
-            # 0 = Skip this run (natural break)
-            # 1 = Upload 1 video
-            # 2 = Upload 2 videos
             RAND_NUM=$(( $RANDOM % 3 ))
             echo "BATCH_SIZE=$RAND_NUM" >> $GITHUB_ENV
             echo "🎲 Randomly selected batch size: $RAND_NUM"
           fi
 
       - name: Checkout Code
-        if: env.BATCH_SIZE != '0' # Only run if batch size > 0
+        if: env.BATCH_SIZE != '0'
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0 
+          fetch-depth: 0
 
       - name: Setup Python
         if: env.BATCH_SIZE != '0'
@@ -64,14 +57,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg tor torsocks
-          
+
           # Install Deno
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
 
-          # Python Libs
+          # Python Libs — FORCE LATEST yt-dlp
           python -m pip install --upgrade pip
-          pip install yt-dlp google-api-python-client google-auth-oauthlib google-auth-httplib2
+          pip install -U yt-dlp google-api-python-client google-auth-oauthlib google-auth-httplib2
+
+          # Also install yt-dlp nightly if stable is broken
+          pip install -U "yt-dlp[default]" || true
+
+          # Show version for debugging
+          echo "--- yt-dlp version ---"
+          yt-dlp --version
+          echo "----------------------"
 
           # Config Tor
           sudo bash -c 'cat >> /etc/tor/torrc << EOF
@@ -88,7 +89,7 @@ jobs:
           SOURCE_URL: ${{ secrets.SOURCE_URL }}
           YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
           YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-          BATCH_SIZE: ${{ env.BATCH_SIZE }} 
+          BATCH_SIZE: ${{ env.BATCH_SIZE }}
           SPEED: "1.05"
           PRIVACY: "public"
           ORDER: "oldest"
@@ -101,7 +102,7 @@ jobs:
           rm -rf dl/ out/
 
       - name: Save History
-        if: env.BATCH_SIZE != '0' # Only save if we actually ran
+        if: env.BATCH_SIZE != '0'
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
