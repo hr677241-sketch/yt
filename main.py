@@ -710,7 +710,9 @@ def main():
 
             # Wait between videos
             if i < len(batch) - 1:
-                wait = random.randint(8, 15)
+                d_min = int(os.environ.get("INTER_DELAY_MIN", "30"))
+                d_max = int(os.environ.get("INTER_DELAY_MAX", "180"))
+                wait = random.randint(d_min, d_max))
                 print(f"\n⏳ Waiting {wait}s...")
                 time.sleep(wait)
 
