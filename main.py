@@ -13,36 +13,23 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
-# ====================== IMPORT MODIFIERS WITH VALIDATION ======================
+# ====================== IMPORT MODIFIERS ======================
 try:
     from title_modifier import modify_title
-    print("✅ title_modifier.py loaded successfully")
-except ImportError as e:
-    print(f"❌ FATAL: Cannot import title_modifier: {e}")
-    print(f"   Current directory: {os.getcwd()}")
-    print(f"   Files here: {os.listdir('.')}")
-    sys.exit(1)
-
-try:
     from description_modifier import modify_description, modify_tags
-    print("✅ description_modifier.py loaded successfully")
+    print("✅ Modifiers loaded successfully")
 except ImportError as e:
-    print(f"❌ FATAL: Cannot import description_modifier: {e}")
-    print(f"   Current directory: {os.getcwd()}")
-    print(f"   Files here: {os.listdir('.')}")
-    sys.exit(1)
-
+    sys.exit(f"❌ FATAL: Modifiers missing: {e}")
 
 # ====================== CONFIG ======================
 SOURCE_URL   = os.environ.get("SOURCE_URL", "")
-SPEED        = float(os.environ.get("SPEED", "1.05"))
+SPEED        = float(os.environ.get("SPEED", "1.05"))          # base speed, will be randomized
 BATCH_SIZE   = int(os.environ.get("BATCH_SIZE", "3"))
 PRIVACY      = os.environ.get("PRIVACY", "public")
 HISTORY_FILE = "history.txt"
 ORDER        = os.environ.get("ORDER", "oldest")
 COOKIES_FILE = "cookies.txt"
 TOR_PROXY    = "socks5://127.0.0.1:9050"
-
 
 # ====================== COOKIES ======================
 def setup_cookies():
@@ -57,7 +44,6 @@ def setup_cookies():
             print(f"⚠️ Cookie decode error: {e}")
     return False
 
-
 # ====================== HISTORY ======================
 def load_history():
     if os.path.exists(HISTORY_FILE):
@@ -65,28 +51,25 @@ def load_history():
             return set(l.strip() for l in f if l.strip())
     return set()
 
-
 def save_history(vid):
     with open(HISTORY_FILE, "a") as f:
         f.write(vid + "\n")
 
-
 # ====================== TOR HELPERS ======================
 def renew_tor():
+    """Restart Tor to get a new IP"""
     try:
-        subprocess.run(["sudo", "killall", "-HUP", "tor"],
-                       capture_output=True, timeout=10)
+        subprocess.run(["sudo", "killall", "-HUP", "tor"], capture_output=True, timeout=10)
         time.sleep(8)
     except:
         try:
-            subprocess.run(["sudo", "service", "tor", "restart"],
-                           capture_output=True, timeout=30)
+            subprocess.run(["sudo", "service", "tor", "restart"], capture_output=True, timeout=30)
             time.sleep(12)
         except:
             pass
 
-
 def find_deno():
+    """Locate deno executable for yt-dlp JS runtime"""
     for p in [os.path.expanduser("~/.deno/bin/deno"),
               "/home/runner/.deno/bin/deno", "/usr/local/bin/deno"]:
         if os.path.exists(p):
@@ -99,14 +82,10 @@ def find_deno():
         pass
     return None
 
-
 # ====================== CHANNEL LISTING ======================
 def get_channel_base(url):
-    return re.sub(
-        r'/(videos|shorts|streams|playlists|community|about|featured)/?$',
-        '', url.strip().rstrip('/')
-    )
-
+    """Remove trailing /videos, /shorts etc."""
+    return re.sub(r'/(videos|shorts|streams|playlists|community|about|featured)/?$', '', url.strip().rstrip('/'))
 
 def get_all_content(url):
     base = get_channel_base(url)
@@ -132,10 +111,8 @@ def get_all_content(url):
     print(f"\n📊 Total content: {len(all_items)}")
     return all_items
 
-
 def _fetch_listing(url):
     opts = {'quiet': True, 'extract_flat': True, 'ignoreerrors': True}
-
     for use_tor in [True, False]:
         try:
             if use_tor:
@@ -151,9 +128,7 @@ def _fetch_listing(url):
                     ]
         except:
             pass
-
     return []
-
 
 # ====================== METADATA FETCH ======================
 def fetch_metadata_via_tor(url, vid):
@@ -201,7 +176,6 @@ def fetch_metadata_via_tor(url, vid):
         pass
 
     return None
-
 
 # ====================== DOWNLOAD ======================
 def download(url, vid, content_type="video"):
@@ -263,7 +237,6 @@ def download(url, vid, content_type="video"):
 
     raise Exception(f"All download methods failed for {vid}")
 
-
 def _base_opts(vid, use_cookies=True):
     opts = {
         'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[ext=mp4]/best',
@@ -286,7 +259,6 @@ def _base_opts(vid, use_cookies=True):
     if use_cookies and os.path.exists(COOKIES_FILE):
         opts['cookiefile'] = COOKIES_FILE
     return opts
-
 
 def _download_tor_hq(url, vid, output, retries=3):
     for attempt in range(1, retries + 1):
@@ -354,7 +326,6 @@ def _download_tor_hq(url, vid, output, retries=3):
 
     raise Exception("Tor HQ download failed")
 
-
 def _download_web(url, vid, output):
     opts = _base_opts(vid, use_cookies=True)
     opts['extractor_args'] = {
@@ -363,7 +334,6 @@ def _download_web(url, vid, output):
         }
     }
     return _run_ytdlp(url, vid, output, opts)
-
 
 def _download_mweb(url, vid, output):
     opts = _base_opts(vid, use_cookies=True)
@@ -374,11 +344,9 @@ def _download_mweb(url, vid, output):
     }
     return _run_ytdlp(url, vid, output, opts)
 
-
 def _download_no_cookies_default(url, vid, output):
     opts = _base_opts(vid, use_cookies=False)
     return _run_ytdlp(url, vid, output, opts)
-
 
 def _download_tor_cli(url, vid, output, retries=1):
     deno = find_deno()
@@ -445,7 +413,6 @@ def _download_tor_cli(url, vid, output, retries=1):
 
     raise Exception("Tor CLI failed")
 
-
 def _run_ytdlp(url, vid, output, opts):
     with yt_dlp.YoutubeDL(opts) as y:
         info = y.extract_info(url, download=True)
@@ -474,7 +441,6 @@ def _run_ytdlp(url, vid, output, opts):
         'tags': info.get('tags', []) or [],
     }
 
-
 # ====================== HELPERS ======================
 def _find_file(vid):
     for ext in ['mp4', 'webm', 'mkv', 'flv', 'avi']:
@@ -482,7 +448,6 @@ def _find_file(vid):
         if os.path.exists(p) and os.path.getsize(p) > 1000:
             return p
     return None
-
 
 def _read_info_json(vid):
     json_path = f'dl/{vid}.info.json'
@@ -506,7 +471,6 @@ def _read_info_json(vid):
 
     return '', '', []
 
-
 def _delete_info_json(vid):
     dl_dir = "dl"
     if not os.path.exists(dl_dir):
@@ -514,7 +478,6 @@ def _delete_info_json(vid):
     for f in os.listdir(dl_dir):
         if f.startswith(vid) and f.endswith('.info.json'):
             os.remove(os.path.join(dl_dir, f))
-
 
 def _clean_files(vid):
     for ext in ['mp4', 'webm', 'mkv', 'part', 'f251.webm', 'f140.m4a',
@@ -531,7 +494,6 @@ def _clean_files(vid):
     _delete_subtitle_files(vid)
     _delete_info_json(vid)
 
-
 def _delete_subtitle_files(vid):
     dl_dir = "dl"
     if not os.path.exists(dl_dir):
@@ -543,7 +505,6 @@ def _delete_subtitle_files(vid):
             filepath = os.path.join(dl_dir, f)
             os.remove(filepath)
             print(f"   🗑️ Deleted subtitle: {f}")
-
 
 def _strip_subs_from_file(filepath):
     if not os.path.exists(filepath):
@@ -571,7 +532,6 @@ def _strip_subs_from_file(filepath):
         if os.path.exists(temp):
             os.remove(temp)
 
-
 def _to_mp4(inp, out):
     subprocess.run([
         'ffmpeg', '-y', '-i', inp,
@@ -584,7 +544,6 @@ def _to_mp4(inp, out):
     ], capture_output=True)
     if os.path.exists(out) and os.path.exists(inp):
         os.remove(inp)
-
 
 def _get_info(path):
     try:
@@ -603,71 +562,65 @@ def _get_info(path):
     except:
         return 1920, 1080, 0
 
-
-# ====================== VIDEO MODIFICATION ======================
-def detect_type(meta, original_type):
-    if original_type == 'short':
-        return 'short'
-    if meta.get('is_short', False):
-        return 'short'
-    if meta.get('height', 0) > meta.get('width', 0):
-        return 'short'
-    return 'video'
-
-
-def modify_video(inp, out, speed, is_short=False):
+# ====================== VIDEO MODIFICATION (RANDOMIZED) ======================
+def modify_video(inp, out, is_short=False):
+    """Apply randomized anti-fingerprint modifications to video/audio."""
     os.makedirs("out", exist_ok=True)
 
+    # ── RANDOMIZED PARAMETERS ──
+    speed = round(random.uniform(1.02, 1.07), 3)          # small speed variation
+    br = round(random.uniform(0.02, 0.05), 3)             # brightness
+    co = round(random.uniform(1.03, 1.08), 3)             # contrast
+    sa = round(random.uniform(1.05, 1.15), 3)             # saturation
+    crop_val = round(random.uniform(0.94, 0.97), 3)       # zoom (crop)
+    noise = random.randint(2, 5)                           # film grain
+    rot = round(random.uniform(-0.015, 0.015), 4)         # slight rotation (radians)
+    bass = random.randint(2, 4)                            # bass gain
+    freq = random.randint(100, 120)                        # bass frequency
+
+    # Video filter chain
     if is_short:
-        scale = "scale=1080:1920:force_original_aspect_ratio=decrease"
-        pad = "pad=1080:1920:(ow-iw)/2:(oh-ih)/2"
+        # Portrait (9:16)
+        scale = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2"
     else:
-        scale = "scale=1920:1080:force_original_aspect_ratio=decrease"
-        pad = "pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
+        # Landscape (16:9)
+        scale = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
 
     vf = ",".join([
         f"setpts=PTS/{speed}",
-        "hflip",
-        "crop=iw*0.95:ih*0.95",
-        scale, pad,
-        "eq=brightness=0.04:contrast=1.06:saturation=1.08",
-        "colorbalance=rs=0.03:gs=-0.02:bs=0.04",
-        "unsharp=5:5:0.8:5:5:0.4",
+        f"crop=iw*{crop_val}:ih*{crop_val}",          # random zoom
+        f"rotate={rot}",                               # tiny rotation
+        scale,                                          # force to target resolution
+        f"eq=brightness={br}:contrast={co}:saturation={sa}",
+        f"noise=alls={noise}:allf=t",                  # film grain
+        "unsharp=5:5:0.8:5:5:0.4",                     # sharpening
     ])
 
+    # Audio filter chain
     af = ",".join([
         f"atempo={speed}",
-        "asetrate=44100*1.02",
+        "asetrate=44100*1.0",                           # keep pitch mostly natural
         "aresample=44100",
-        "bass=g=3:f=110",
-        "equalizer=f=1000:width_type=h:width=200:g=-2",
+        f"bass=g={bass}:f={freq}",                      # random bass EQ
+        "volume=1.05"
     ])
 
     cmd = [
         "ffmpeg", "-y", "-i", inp,
-        "-map", "0:v:0",
-        "-map", "0:a:0",
-        "-sn",
-        "-filter:v", vf,
-        "-filter:a", af,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-vf", vf, "-af", af,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
         "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart",
         "-map_metadata", "-1",
-        "-map_chapters", "-1",
+        "-movflags", "+faststart",
+        out
     ]
 
+    # For shorts, limit duration to 60 seconds (YouTube Shorts limit)
     if is_short:
         cmd.extend(["-t", "59"])
 
-    cmd.append(out)
-
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise Exception(f"FFmpeg failed: {r.stderr[-200:]}")
-
-    print(f"   ✅ {'Short' if is_short else 'Video'} modified (no subs)")
-
+    subprocess.run(cmd, check=True, stderr=subprocess.DEVNULL)
+    print(f"   ✨ Modifiers: Speed {speed}x | Zoom {int((1-crop_val)*100)}% | Rot {rot:.3f} rad | Bright {br}")
 
 # ====================== UPLOAD ======================
 def get_youtube():
@@ -684,7 +637,6 @@ def get_youtube():
         client_secret=token['client_secret'],
     )
     return build("youtube", "v3", credentials=creds)
-
 
 def upload_video(yt, path, title, desc, tags, privacy):
     body = {
@@ -714,6 +666,11 @@ def upload_video(yt, path, title, desc, tags, privacy):
                 if pct % 25 == 0:
                     print(f"      {pct}%")
         except HttpError as e:
+            # Quota exceeded? Exit gracefully
+            if e.resp.status == 403 and "quota" in str(e).lower():
+                print("   ⚠️  YouTube quota exceeded. Stopping batch.")
+                sys.exit(0)
+            # Retry on server errors
             if e.resp.status in [500, 502, 503, 504]:
                 retry += 1
                 if retry > 10:
@@ -731,11 +688,10 @@ def upload_video(yt, path, title, desc, tags, privacy):
     print(f"   ✅ https://youtu.be/{vid_id}")
     return vid_id
 
-
 # ====================== MAIN ======================
 def main():
     print("=" * 60)
-    print("🚀 YouTube Auto Pipeline v3.1 (with title/desc modifiers)")
+    print("🚀 YouTube Auto Pipeline v4 (Anti-Fingerprint + Robust Download)")
     print("=" * 60)
 
     try:
@@ -795,120 +751,58 @@ def main():
             # ── DOWNLOAD ──
             print("\n⬇️  Downloading...")
             meta = download(v['url'], v['id'], ct)
-            content_type = detect_type(meta, ct)
-            is_short = content_type == 'short'
+            content_type = 'short' if meta['is_short'] else 'video'
+            is_short = (content_type == 'short')
 
-            # ── MODIFY VIDEO ──
-            print("\n⚡ Modifying video...")
+            # ── MODIFY VIDEO (with randomization) ──
+            print("\n⚡ Modifying video (anti-fingerprint)...")
             out_file = f"out/{v['id']}_mod.mp4"
-            modify_video(meta['file'], out_file, SPEED, is_short)
+            modify_video(meta['file'], out_file, is_short)
 
-            # ══════════════════════════════════════════════════════
-            # ── TITLE MODIFICATION (title_modifier.py) ──
-            # ══════════════════════════════════════════════════════
-            original_title = (
-                meta.get('title')
-                or v.get('title')
-                or 'Untitled'
-            ).strip()
-
-            # Safety: reject garbage titles
+            # ── MODIFY METADATA ──
+            original_title = (meta.get('title') or v.get('title') or 'Untitled').strip()
             if original_title in ['', 'Untitled', 'dl/', 'dl', '.', '..']:
                 original_title = v.get('title', 'Untitled')
 
             print(f"\n📝 TITLE MODIFICATION:")
-            print(f"   📥 ORIGINAL TITLE: \"{original_title}\"")
-            print(f"   🔧 Calling modify_title(is_short={is_short})...")
-
+            print(f"   📥 ORIGINAL: \"{original_title}\"")
             new_title = modify_title(original_title, is_short=is_short)
-
-            # Safety: if modifier returned None or empty, fall back
             if not new_title or len(new_title.strip()) < 3:
-                print(f"   ⚠️ modify_title returned empty/None, using original")
                 new_title = original_title[:100]
             else:
                 new_title = new_title.strip()
+            print(f"   📤 NEW:      \"{new_title}\"")
 
-            print(f"   📤 NEW TITLE:      \"{new_title}\"")
-            print(f"   📏 Length: {len(new_title)}/100 chars")
-
-            # Verify it actually changed
-            if new_title.lower() == original_title.lower():
-                print(f"   ⚠️ Title unchanged! Forcing prefix...")
-                new_title = f"🔥 {original_title}"[:100]
-
-            # ══════════════════════════════════════════════════════
-            # ── DESCRIPTION MODIFICATION (description_modifier.py) ──
-            # ══════════════════════════════════════════════════════
             original_desc = meta.get('desc', '') or ''
-
-            print(f"\n📝 DESCRIPTION MODIFICATION:")
-            print(f"   📥 ORIGINAL DESC: {len(original_desc)} chars")
-            if original_desc:
-                print(f"   📥 Preview: \"{original_desc[:80]}...\"")
-            else:
-                print(f"   📥 Preview: (empty - will generate fresh)")
-
-            print(f"   🔧 Calling modify_description(new_title, is_short={is_short})...")
-
+            print(f"\n📝 DESCRIPTION MODIFICATION: {len(original_desc)} chars")
             new_desc = modify_description(original_desc, new_title, is_short=is_short)
-
-            # Safety: if modifier returned None or empty, fall back
             if not new_desc or len(new_desc.strip()) < 10:
-                print(f"   ⚠️ modify_description returned empty/None, using original")
                 new_desc = original_desc if original_desc else f"Watch: {new_title}"
             else:
                 new_desc = new_desc.strip()
-
             print(f"   📤 NEW DESC: {len(new_desc)} chars")
-            print(f"   📤 Preview: \"{new_desc[:100]}...\"")
 
-            # ══════════════════════════════════════════════════════
-            # ── TAGS MODIFICATION (description_modifier.py) ──
-            # ══════════════════════════════════════════════════════
             original_tags = meta.get('tags', []) or []
-
-            print(f"\n📝 TAGS MODIFICATION:")
-            print(f"   📥 ORIGINAL TAGS: {len(original_tags)} → {original_tags[:5]}")
-            print(f"   🔧 Calling modify_tags()...")
-
+            print(f"\n📝 TAGS MODIFICATION: {len(original_tags)} original")
             new_tags = modify_tags(original_tags)
-
-            # Safety: if modifier returned None or empty, fall back
             if not new_tags:
-                print(f"   ⚠️ modify_tags returned empty/None, using defaults")
                 new_tags = ["trending", "viral", "must watch", "2024"]
             else:
                 new_tags = list(new_tags)
-
-            # For shorts, add extra short-specific tags
+            # Add short-specific tags
             if is_short:
                 short_extras = [
                     "shorts", "youtube shorts", "viral shorts",
                     "trending shorts", "reels", "short video",
                     "fyp", "for you", "viral", "trending",
                 ]
-                # Merge without duplicates
                 existing_lower = {t.lower() for t in new_tags}
                 for st in short_extras:
                     if st.lower() not in existing_lower:
                         new_tags.append(st)
                         existing_lower.add(st.lower())
                 new_tags = new_tags[:30]
-
             print(f"   📤 NEW TAGS: {len(new_tags)} → {new_tags[:8]}...")
-
-            # ══════════════════════════════════════════════════════
-            # ── FINAL SUMMARY BEFORE UPLOAD ──
-            # ══════════════════════════════════════════════════════
-            print(f"\n{'─' * 40}")
-            print(f"📋 UPLOAD SUMMARY:")
-            print(f"   Title: \"{new_title[:70]}\"")
-            print(f"   Desc:  {len(new_desc)} chars")
-            print(f"   Tags:  {len(new_tags)} tags")
-            print(f"   Type:  {'SHORT' if is_short else 'VIDEO'}")
-            print(f"   Privacy: {PRIVACY}")
-            print(f"{'─' * 40}")
 
             # ── UPLOAD ──
             print("\n📤 Uploading...")
@@ -963,7 +857,6 @@ def main():
     elif remaining == 0:
         print(f"   🎉 ALL DONE!")
     print(f"{'=' * 60}")
-
 
 if __name__ == "__main__":
     main()
