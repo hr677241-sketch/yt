@@ -11,14 +11,14 @@ on:
         required: false
         default: 'no'
   schedule:
-    # PKT peak windows (UTC+5) — irregular gaps
-    - cron: '17 4 * * *'    # 09:17 PKT 🌅
-    - cron: '43 6 * * *'    # 11:43 PKT ☀️
-    - cron: '08 9 * * *'    # 14:08 PKT 🌤️
-    - cron: '51 11 * * *'   # 16:51 PKT 🌤️
-    - cron: '27 14 * * *'   # 19:27 PKT 🌆
-    - cron: '03 16 * * *'   # 21:03 PKT 🌙
-    - cron: '39 18 * * *'   # 23:39 PKT 🌙
+    # PKT peak windows (UTC+5)
+    - cron: '17 4 * * *'    # 09:17 PKT
+    - cron: '43 6 * * *'    # 11:43 PKT
+    - cron: '08 9 * * *'    # 14:08 PKT
+    - cron: '51 11 * * *'   # 16:51 PKT
+    - cron: '27 14 * * *'   # 19:27 PKT
+    - cron: '03 16 * * *'   # 21:03 PKT
+    - cron: '39 18 * * *'   # 23:39 PKT
 
 concurrency:
   group: content-pipeline
@@ -30,7 +30,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180  # Increased to prevent timeouts
 
     steps:
       - name: 🧠 Human Behavior Engine
@@ -45,168 +45,91 @@ jobs:
           ROLL3=$((RANDOM % 100))
 
           echo "══════════════════════════════════════"
-          echo "🧠 Decision Engine"
-          echo "   🕐 PKT: $(TZ='Asia/Karachi' date '+%H:%M %A')"
-          echo "   🎲 Rolls: $ROLL / $ROLL2 / $ROLL3"
+          echo "🧠 Decision Engine (PKT Timezone)"
+          echo "   🕐 Current: $(TZ='Asia/Karachi' date '+%H:%M %A')"
           echo "══════════════════════════════════════"
 
-          # ── MANUAL OVERRIDE ──
           if [[ "${{ inputs.force_batch }}" != "" ]]; then
             echo "BATCH_SIZE=${{ inputs.force_batch }}" >> $GITHUB_ENV
             echo "RUN_DELAY=15" >> $GITHUB_ENV
             echo "INTER_DELAY_MIN=10" >> $GITHUB_ENV
             echo "INTER_DELAY_MAX=30" >> $GITHUB_ENV
-            echo "✅ Manual override: batch=${{ inputs.force_batch }}"
+            echo "✅ Manual override active"
             exit 0
           fi
 
-          # ══════════════════════════════════════
-          # TIME-OF-DAY ACTIVITY MODEL (PKT)
-          # ══════════════════════════════════════
-          #
-          # Deep night  (0-6):   90% skip  (sleeping)
-          # Early morn  (7-9):   45% skip  (chai, waking up)
-          # Morning    (10-13):  15% skip  (active)
-          # Afternoon  (14-17):  20% skip  (active)
-          # Evening    (18-22):  10% skip  (peak — after work)
-          # Late night (23):     60% skip  (winding down)
-
+          # ── TIME-OF-DAY MODEL (PKT) ──
           if [ "$HOUR" -lt 7 ]; then
-            SKIP_PCT=90
-            PERIOD="🌙 Deep night"
+            SKIP_PCT=90; PERIOD="🌙 Deep night"
           elif [ "$HOUR" -lt 10 ]; then
-            SKIP_PCT=45
-            PERIOD="🌅 Early morning"
+            SKIP_PCT=45; PERIOD="🌅 Early morning"
           elif [ "$HOUR" -lt 14 ]; then
-            SKIP_PCT=15
-            PERIOD="☀️ Morning"
+            SKIP_PCT=15; PERIOD="☀️ Morning"
           elif [ "$HOUR" -lt 18 ]; then
-            SKIP_PCT=20
-            PERIOD="🌤️ Afternoon"
+            SKIP_PCT=20; PERIOD="🌤️ Afternoon"
           elif [ "$HOUR" -lt 23 ]; then
-            SKIP_PCT=10
-            PERIOD="🌆 Evening (peak)"
+            SKIP_PCT=10; PERIOD="🌆 Evening (Peak)"
           else
-            SKIP_PCT=60
-            PERIOD="🌙 Late night"
+            SKIP_PCT=60; PERIOD="🌙 Late night"
           fi
 
-          echo "   $PERIOD → base skip: ${SKIP_PCT}%"
+          echo "   $PERIOD → Base skip: ${SKIP_PCT}%"
 
-          # ── FRIDAY/SATURDAY (Pakistan weekend) ──
-          if [ "$DOW" -eq 5 ]; then
-            SKIP_PCT=$((SKIP_PCT + 20))
-            echo "   📅 Friday (Jumu'ah): +20% skip"
-          elif [ "$DOW" -eq 6 ]; then
-            SKIP_PCT=$((SKIP_PCT + 15))
-            echo "   📅 Saturday: +15% skip"
-          fi
+          # ── DAY ADJUSTMENTS ──
+          if [ "$DOW" -eq 5 ]; then SKIP_PCT=$((SKIP_PCT + 20)); fi # Friday
+          if [ "$DOW" -eq 6 ]; then SKIP_PCT=$((SKIP_PCT + 15)); fi # Saturday
+          if [ "$DOW" -eq 1 ] || [ "$DOW" -eq 2 ]; then SKIP_PCT=$((SKIP_PCT - 10)); fi
 
-          # ── MONDAY/TUESDAY BOOST ──
-          if [ "$DOW" -eq 1 ] || [ "$DOW" -eq 2 ]; then
-            SKIP_PCT=$((SKIP_PCT - 10))
-            echo "   📅 Mon/Tue: -10% skip (upload day)"
-          fi
-
-          # ── CLAMP ──
+          # Clamp
           if [ "$SKIP_PCT" -gt 95 ]; then SKIP_PCT=95; fi
           if [ "$SKIP_PCT" -lt 5 ]; then SKIP_PCT=5; fi
 
-          echo "   📊 Final skip chance: ${SKIP_PCT}%"
-
-          # ══════════════════════════════════════
-          # SKIP DECISION
-          # ══════════════════════════════════════
+          # ── SKIP CHECK ──
           if [ "$ROLL" -lt "$SKIP_PCT" ]; then
             echo "BATCH_SIZE=0" >> $GITHUB_ENV
             echo "RUN_DELAY=0" >> $GITHUB_ENV
-            echo ""
-            echo "   😴 Skipping — natural break"
+            echo "   😴 Decided to SKIP this run."
             exit 0
           fi
 
-          # ══════════════════════════════════════
-          # BATCH SIZE
-          # ══════════════════════════════════════
-          # 50% → 1   30% → 2   15% → 3   5% → 4
+          # ── BATCH SIZE ──
+          if [ "$ROLL2" -lt 50 ]; then BATCH=1
+          elif [ "$ROLL2" -lt 80 ]; then BATCH=2
+          elif [ "$ROLL2" -lt 95 ]; then BATCH=3
+          else BATCH=4; fi
 
-          if [ "$ROLL2" -lt 50 ]; then
-            BATCH=1
-          elif [ "$ROLL2" -lt 80 ]; then
-            BATCH=2
-          elif [ "$ROLL2" -lt 95 ]; then
-            BATCH=3
-          else
-            BATCH=4
-          fi
-
-          # Late night cap
+          # Night Cap
           if [ "$HOUR" -lt 7 ] || [ "$HOUR" -ge 23 ]; then
-            if [ "$BATCH" -gt 2 ]; then
-              BATCH=2
-              echo "   🌙 Night cap: max 2 videos"
-            fi
+            if [ "$BATCH" -gt 2 ]; then BATCH=2; fi
           fi
-
-          echo "   📦 Batch size: $BATCH"
           echo "BATCH_SIZE=$BATCH" >> $GITHUB_ENV
 
-          # ══════════════════════════════════════
-          # PRE-RUN DELAY
-          # ══════════════════════════════════════
-          if [ "$ROLL3" -lt 30 ]; then
-            DELAY=$(( RANDOM % 780 + 120 ))
-            echo "   ⏱️ Quick start: $((DELAY/60))m"
-          elif [ "$ROLL3" -lt 75 ]; then
-            DELAY=$(( RANDOM % 1800 + 900 ))
-            echo "   ⏱️ Medium start: $((DELAY/60))m"
-          else
-            DELAY=$(( RANDOM % 2400 + 2700 ))
-            echo "   ⏱️ Slow start: $((DELAY/60))m"
-          fi
-
+          # ── DELAYS ──
+          if [ "$ROLL3" -lt 30 ]; then DELAY=$(( RANDOM % 780 + 120 ))
+          elif [ "$ROLL3" -lt 75 ]; then DELAY=$(( RANDOM % 1800 + 900 ))
+          else DELAY=$(( RANDOM % 2400 + 2700 )); fi
+          
+          # Cap delay to fit in 180m timeout
+          if [ "$DELAY" -gt 3600 ]; then DELAY=3600; fi
+          
           echo "RUN_DELAY=$DELAY" >> $GITHUB_ENV
 
-          # ══════════════════════════════════════
-          # INTER-VIDEO DELAY
-          # ══════════════════════════════════════
           IMIN=$(( RANDOM % 150 + 30 ))
           IMAX=$(( IMIN + RANDOM % 360 + 120 ))
           echo "INTER_DELAY_MIN=$IMIN" >> $GITHUB_ENV
           echo "INTER_DELAY_MAX=$IMAX" >> $GITHUB_ENV
-          echo "   ⏳ Between videos: ${IMIN}s–${IMAX}s"
 
-          echo ""
-          echo "══════════════════════════════════════"
-          echo "✅ DECISION: Upload $BATCH after ~$((DELAY/60))min delay"
-          echo "══════════════════════════════════════"
+          echo "   ✅ RUNNING: Batch $BATCH, Delay $((DELAY/60))m"
 
       - name: ⏳ Natural Delay
         if: env.BATCH_SIZE != '0'
         run: |
           DELAY=${{ env.RUN_DELAY }}
-
           if [[ "${{ inputs.skip_delay }}" == "yes" ]]; then
-            echo "⏩ Delay skipped (manual override)"
-            sleep 5
+            echo "⏩ Skipping delay"
           elif [ "$DELAY" -gt 0 ]; then
-            MINS=$((DELAY / 60))
-            echo "☕ Simulating human delay: ~${MINS} minutes"
-
-            CHUNK=300
-            ELAPSED=0
-            while [ "$ELAPSED" -lt "$DELAY" ]; do
-              REMAINING=$((DELAY - ELAPSED))
-              if [ "$REMAINING" -lt "$CHUNK" ]; then
-                sleep "$REMAINING"
-                ELAPSED=$DELAY
-              else
-                sleep $CHUNK
-                ELAPSED=$((ELAPSED + CHUNK))
-                echo "   ⏳ $((ELAPSED/60))m / ${MINS}m ..."
-              fi
-            done
-            echo "   ✅ Starting now"
+            echo "☕ Waiting $((DELAY/60)) minutes..."
+            sleep "$DELAY"
           fi
 
       - name: 📥 Checkout
@@ -227,16 +150,16 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg tor torsocks > /dev/null 2>&1
-
+          
+          # Install Deno for JS execution (CAPTCHA bypass)
           curl -fsSL https://deno.land/install.sh | sh 2>/dev/null
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
 
-          python -m pip install --upgrade pip -q
+          pip install -U pip -q
           pip install -U yt-dlp google-api-python-client google-auth-oauthlib google-auth-httplib2 -q
           pip install -U "yt-dlp[default]" -q 2>/dev/null || true
 
-          echo "📦 yt-dlp $(yt-dlp --version)"
-
+          # Configure Tor
           sudo bash -c 'cat >> /etc/tor/torrc << EOF
           ExitNodes {us},{gb},{de},{fr},{nl},{se},{ca},{au},{jp}
           StrictNodes 0
@@ -254,7 +177,6 @@ jobs:
           BATCH_SIZE: ${{ env.BATCH_SIZE }}
           INTER_DELAY_MIN: ${{ env.INTER_DELAY_MIN }}
           INTER_DELAY_MAX: ${{ env.INTER_DELAY_MAX }}
-          SPEED: "1.05"
           PRIVACY: "public"
           ORDER: "oldest"
         run: python main.py
@@ -272,17 +194,4 @@ jobs:
           git config --global user.email "actions@github.com"
           git pull origin main --rebase || git pull origin main
           git add history.txt
-
-          MSGS=(
-            "update progress"
-            "save checkpoint"
-            "sync data"
-            "update records"
-            "checkpoint save"
-            "progress update"
-            "data sync"
-            "save state"
-          )
-          MSG=${MSGS[$((RANDOM % ${#MSGS[@]}))]}
-
-          git diff --staged --quiet || (git commit -m "📝 $MSG [skip ci]" && git push)
+          git diff --staged --quiet || (git commit -m "📝 progress update [skip ci]" && git push)
